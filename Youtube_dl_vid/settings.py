@@ -25,9 +25,26 @@ SECRET_KEY = '5!4a_zj5c!-(vv)^8taqortb*)vuw3&w7w&4=!dmd97xz&4udu'
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
 
+ALLOWED_HOSTS = ['*']
 
+CORS_ALLOW_HEADERS = [
+      "accept",
+       "accept-encoding",
+       "authorization",
+       "content-type",
+       "dnt",
+       "origin",
+       "user-agent",
+       "x-csrftoken",
+       "x-requested-with",
+   ]
+# Application definition
+CORS_ORIGIN_ALLOW_ALL = True
+CORS_ALLOW_ALL_ORIGINS = False
+CORS_ALLOW_CREDENTIALS = True
+
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 # Application definition
 
 INSTALLED_APPS = [
@@ -40,6 +57,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -75,8 +93,12 @@ WSGI_APPLICATION = 'Youtube_dl_vid.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
+        'ENGINE': 'django.db.backends.postgresql_psycopg2',
+        'NAME':'youtube_project',
+        'USER':'lmex',
+        'PASSWORD':'postgres',
+        'HOST':'localhost',
+        'PORT':'5432'
     }
 }
 

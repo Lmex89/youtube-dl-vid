@@ -1,27 +1,25 @@
-from django.shortcuts import render
-
-# Create your views here.
-from rest_framework import generics, status
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from .models import ImgPortada, Categorias
-from .serializers import CategoryModelSerializer, ImgPortadaSerializer
 from django.db.models import Q
+from rest_framework import generics, status
+from rest_framework.response import Response
+
+from videos.models import Categorias, CodecUrls, VideosUploaded
+from videos.serializers import (CategoryModelSerializer, CodecUrlsSerializer,
+                                VideosUpladedSerializer)
 
 
-class ImgPortadaView(generics.RetrieveAPIView):
-    queryset = ImgPortada.objects.all()
-    serializer_class = ImgPortadaSerializer
-    permission_classes = (IsAuthenticated,)
+class CodeUrlsAPIView(generics.RetrieveAPIView):
+    queryset = CodecUrls.objects.all()
+    serializer_class = CodecUrlsSerializer
+    permission_classes = ()
 
     def get(self, request, *args, **kwargs):
         return super().get(request, *args, **kwargs)
 
 
-class ImgPortadataListCreateAPIView(generics.ListCreateAPIView):
-    queryset = ImgPortada.objects.all()
-    serializer_class = ImgPortadaSerializer
-    permission_classes = (IsAuthenticated,)
+class CodecUrlsListCreateAPIView(generics.ListCreateAPIView):
+    queryset = CodecUrls.objects.all()
+    serializer_class = CodecUrlsSerializer
+    permission_classes = ()
 
     def filters(self):
         title = self.request.query_params.get("title")
@@ -49,8 +47,20 @@ class ImgPortadataListCreateAPIView(generics.ListCreateAPIView):
 class CategoriasListCreateAPIView(generics.ListCreateAPIView):
     queryset = Categorias.objects.all()
     serializer_class = CategoryModelSerializer
-    permission_classes = (IsAuthenticated,)
+    permission_classes = ()
+    
+    def get(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
 
+    def post(self, request, *args, **kwargs):
+        return super().create(request, *args, **kwargs)
+
+
+class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
+    queryset = VideosUploaded.objects.all()
+    serializer_class = VideosUpladedSerializer
+    permission_classes = ()
+    
     def get(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
 

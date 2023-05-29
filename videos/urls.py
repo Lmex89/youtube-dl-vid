@@ -1,8 +1,7 @@
-from django.urls import  path
-from .views import ImgPortadaView, ImgPortadataListCreateAPIView
+from django.urls import path
+from videos import views
 
 url_portada = [
-    path('portada/',ImgPortadataListCreateAPIView.as_view()),
-    path('portada/<uuid:pk>',
-         ImgPortadaView.as_view()),
+    path("videos/", views.CodecUrlsListCreateAPIView.as_view()),
+    path("videos/<uuid:pk>", views.CodecUrlsListCreateAPIView.as_view()),
 ]
