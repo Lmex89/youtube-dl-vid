@@ -1,0 +1,32 @@
+version: '3'
+
+services:
+  db:
+    image: postgres
+    volumes:
+      - ./data/db:/var/lib/postgresql/data
+    ports:
+      - 0.0.0.0:51432:5432/tcp
+    environment:
+      - POSTGRES_DB=book_project
+      - POSTGRES_USER=lmex
+      - POSTGRES_PASSWORD=postgres
+      - TZ=America/Mexico_City
+
+  web:
+    build: .
+    #command: bash -c "gunicorn bookproject.wsgi:application --timeout 120 --workers=3 --threads=3 --worker-connections=1000 --bind 0.0.0.0:8000 "
+    #command: "python manage.py runserver"
+    entrypoint: ["bash","docker-entrypoint.sh"]
+    volumes:
+      - .:/code
+    ports:
+      - 8002:8000
+    environment:
+      - DJANGO_SETTINGS_MODULE=bookproject.settings
+      - POSTGRES_NAME=postgres
+      - POSTGRES_USER=lmex
+      - POSTGRES_PASSWORD=postgres
+      - TZ=America/Mexico_City
+    depends_on:
+      - db
