@@ -1,4 +1,5 @@
 import os
+import time
 
 from django.core.files import File
 from django.http import HttpResponse
@@ -77,18 +78,19 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
 
         try:
             services.SpCommand(command_list=comandos, tmp_file="test.txt")
+            time.sleep(3)
         except Exception as error:
             url_.status = StatusCodec.error
             url_.save()
             return Response(
-                data=dict(error=error), status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                data=dict(error=str(error)), status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
         try:
             with open(f"static/{url_.id}.mp4", "rb") as videop:
                 return self.get_video_codec(videop, url_)
         except Exception as error:
             return Response(
-                data=dict(error=error), status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                data=dict(error=str(error)), status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
     def get_video_codec(self, videop, url_):

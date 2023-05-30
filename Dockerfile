@@ -5,9 +5,8 @@ LABEL Author="Luis Mex"
 
 # The enviroment variable ensures that the python output is set straight
 # to the terminal with out buffering it first
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONBUFFERED 1
-
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 #directory to store app source code
 RUN mkdir /code
 

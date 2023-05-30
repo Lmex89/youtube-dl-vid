@@ -23,6 +23,7 @@ class SpCommand:
     def call_command(
         self,
     ) -> List[str]:
+        print(f"list of commands {self.command_list}")
         file = open(self.tmp_file, "w")
         sp.call(self.command_list, stdout=file)
         file = open(self.tmp_file, "r")
