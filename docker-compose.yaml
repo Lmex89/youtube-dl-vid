@@ -8,7 +8,7 @@ services:
     ports:
       - 0.0.0.0:51432:5432/tcp
     environment:
-      - POSTGRES_DB=book_project
+      - POSTGRES_DB=youtube_project
       - POSTGRES_USER=lmex
       - POSTGRES_PASSWORD=postgres
       - TZ=America/Mexico_City
@@ -21,9 +21,9 @@ services:
     volumes:
       - .:/code
     ports:
-      - 8002:8000
+      - 8010:8000
     environment:
-      - DJANGO_SETTINGS_MODULE=bookproject.settings
+      - DJANGO_SETTINGS_MODULE=Youtube_dl_vid.settings
       - POSTGRES_NAME=postgres
       - POSTGRES_USER=lmex
       - POSTGRES_PASSWORD=postgres
