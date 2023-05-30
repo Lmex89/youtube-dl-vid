@@ -25,7 +25,6 @@ SECRET_KEY = "5!4a_zj5c!-(vv)^8taqortb*)vuw3&w7w&4=!dmd97xz&4udu"
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-
 ALLOWED_HOSTS = ["*"]
 
 CORS_ALLOW_HEADERS = [
@@ -98,7 +97,7 @@ DATABASES = {
         "NAME": "youtube_project",
         "USER": "lmex",
         "PASSWORD": "postgres",
-        "HOST": "localhost",
+        "HOST": "db",
         "PORT": "5432",
     }
 }
@@ -154,3 +153,5 @@ STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 # https://docs.djangoproject.com/en/3.2/ref/settings/#default-auto-field
 MEDIA_URL = "uploads/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "uploads")
+CSRF_COOKIE_SECURE = False
+SESSION_COOKIE_SECURE = False

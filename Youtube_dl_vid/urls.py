@@ -16,8 +16,16 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path, include
 from videos.urls import urls
+from django.conf.urls.static import static
+from django.conf import settings
+from django.contrib.staticfiles.urls import staticfiles_urlpatterns
+
+# ... 
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/v1/yt/', include(urls)),
 ]
+
+
+urlpatterns += staticfiles_urlpatterns()
