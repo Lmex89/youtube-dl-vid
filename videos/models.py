@@ -38,11 +38,11 @@ class Categorias(BaseModel):
 class CodecUrls(BaseModel):
     id = models.UUIDField(primary_key=True, unique=True, default=uuid.uuid4)
     url = models.CharField(max_length=350, null=False)
-    status = models.PositiveSmallIntegerField(StatusCodec.choices, default=StatusCodec.pending)
+    status = models.PositiveSmallIntegerField(choices=StatusCodec.choices, default=StatusCodec.pending)
 
 class VideosUploaded(BaseModel):
     id = models.UUIDField(primary_key=True, unique=True, default=uuid.uuid4)
-    video = models.FieldFile(upload_to="videos_up/portada", blank=True, null=True)
+    video = models.FileField(upload_to="videos/", blank=True, null=True)
     title = models.CharField(max_length=250, null=False, default="test")
     category = models.ForeignKey(Categorias, null=True, on_delete=models.SET_NULL)
     codecurl = models.ForeignKey(CodecUrls, null=True, on_delete=models.SET_NULL)
