@@ -96,12 +96,12 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
     def get_video_codec(self, videop, url_):
         f_video = File(videop)
         data = VideosUploaded.objects.create(video=f_video, title="Test", codecurl=url_)
-
+        print(f"********** data ********* {data}")
         serializer = self.get_serializer(data)
 
         url_.status = StatusCodec.success
         url_.save()
-
+        print(f"************* Video codificado : {serializer.data} *************")
         return Response(data=serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -112,6 +112,7 @@ class VideosUploadedDetailAPIView(generics.RetrieveAPIView):
 
     def get(self, request, *args, **kwargs):
         video_codec = self.get_queryset().filter(pk=kwargs.get("pk")).first()
+        print(f"video encontrado ************* {video_codec} ************ ")
         file = video_codec.video
         with file.open() as f:
             file_content = f.read()
