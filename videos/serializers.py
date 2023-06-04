@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import ImgPortada, Categorias
+from videos.models import CodecUrls, Categorias, VideosUploaded
 
 
 class CategoryModelSerializer(serializers.ModelSerializer):
@@ -8,7 +8,12 @@ class CategoryModelSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
-class ImgPortadaSerializer(serializers.ModelSerializer):
+class CodecUrlsSerializer(serializers.ModelSerializer):
     class Meta:
-        model = ImgPortada
+        model = CodecUrls
+        fields = "__all__"
+
+class VideosUpladedSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VideosUploaded
         fields = "__all__"

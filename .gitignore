@@ -1,5 +1,7 @@
-.*venv*
+.*venv_*
 data/*
 *.pyc*
 *.cpython*
 uploads/*
+static/*
+staticfiles/*
