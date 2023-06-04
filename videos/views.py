@@ -54,10 +54,11 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
         return super().list(request, *args, **kwargs)
 
     def add_commands(self, *args, **kwargs):
-        services.COMMAND_YT_DLP.append(kwargs.get("url"))
-        services.COMMAND_YT_DLP.append(kwargs.get("output_flag"))
-        services.COMMAND_YT_DLP.append(kwargs.get("path"))
-        return services.COMMAND_YT_DLP
+        commands = services.COMMAND_YT_DLP.copy()
+        commands.append(kwargs.get("url"))
+        commands.append(kwargs.get("output_flag"))
+        commands.append(kwargs.get("path"))
+        return commands
 
     def insert_commandos_from_str(self, url_):
         static_directory = os.path.abspath("static/")
@@ -70,12 +71,12 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
     def create_code_url(self):
         url_ = CodecUrls.objects.create(url=self.request.data.get("url"))
         url_.save()
+        print(" ** url creada ** {url_}")
         return url_
 
     def post(self, request, *args, **kwargs):
         url_ = self.create_code_url()
         comandos = self.insert_commandos_from_str(url_)
-
         try:
             services.SpCommand(command_list=comandos, tmp_file="test.txt")
             time.sleep(3)
