@@ -1,4 +1,4 @@
-FROM python:3.9
+FROM python:3.11
 
 #maintainer
 LABEL Author="Luis Mex"
@@ -16,7 +16,7 @@ WORKDIR /code
 #copy the app code to image working directory
 COPY ./requirements.txt /code
 
-RUN apt-get update && apt-get upgrade -y && apt-get install postgresql-client gcc  musl-dev  -y
+RUN apt update &&  apt install -y postgresql-client gcc  musl-dev  ffmpeg
 RUN wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O /usr/local/bin/yt-dlp
 RUN chmod a+rx /usr/local/bin/yt-dlp  # Make executable
 #let pip install required packages

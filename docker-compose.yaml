@@ -1,10 +1,9 @@
-version: '3'
 
 services:
   db:
     image: postgres
     volumes:
-      - ./data/db:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     ports:
       - 0.0.0.0:51432:5432/tcp
     environment:
@@ -21,7 +20,7 @@ services:
     volumes:
       - .:/code
     ports:
-      - 8010:8000
+      - 8011:8000
     environment:
       - DJANGO_SETTINGS_MODULE=Youtube_dl_vid.settings
       - POSTGRES_NAME=postgres
@@ -30,3 +29,5 @@ services:
       - TZ=America/Mexico_City
     depends_on:
       - db
+volumes:
+  postgres_data:
