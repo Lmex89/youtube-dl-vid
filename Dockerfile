@@ -21,6 +21,11 @@ RUN wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O /us
 RUN chmod a+rx /usr/local/bin/yt-dlp  # Make executable
 #let pip install required packages
 RUN  pip install --upgrade pip && pip install -r requirements.txt  
+
+RUN mkdir -p /var/log/gunicorn
+RUN chown www-data:www-data /var/log/gunicorn
+RUN chmod 755 /var/log/gunicorn
+
 COPY . /code
 RUN ["chmod", "+x", "docker-entrypoint.sh"]
 ENTRYPOINT ["bash","/docker-entrypoint.sh"]

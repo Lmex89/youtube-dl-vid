@@ -13,3 +13,4 @@ sqlparse==0.4.3
 whitenoise==6.3.0
 django-utils
 django-utils2
+loguru

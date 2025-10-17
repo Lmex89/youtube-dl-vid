@@ -40,10 +40,17 @@ class CodecUrls(BaseModel):
     url = models.CharField(max_length=350, null=False)
     status = models.PositiveSmallIntegerField(choices=StatusCodec.choices, default=StatusCodec.pending)
 
+    def __str__(self):
+        return f"id={self.id}, url={self.url} status={self.status}"
+
 class VideosUploaded(BaseModel):
     id = models.UUIDField(primary_key=True, unique=True, default=uuid.uuid4)
     video = models.FileField(upload_to="videos/", blank=True, null=True)
     title = models.CharField(max_length=250, null=False, default="test")
     category = models.ForeignKey(Categorias, null=True, on_delete=models.SET_NULL)
     codecurl = models.ForeignKey(CodecUrls, null=True, on_delete=models.SET_NULL)
+
+    def __str__(self):
+        return f"id={self.id}, video={self.video} title={self.title}"
+
 

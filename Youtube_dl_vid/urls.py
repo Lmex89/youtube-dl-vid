@@ -28,4 +28,7 @@ urlpatterns = [
 ]
 
 
-urlpatterns += staticfiles_urlpatterns()
+# Serve media files (uploads) in development
+if settings.DEBUG:
+    urlpatterns += staticfiles_urlpatterns()  # static files
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

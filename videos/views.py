@@ -1,6 +1,8 @@
+from __future__ import annotations
 import os
 import time
 
+from loguru import logger 
 from django.core.files import File
 from django.http import HttpResponse
 from rest_framework import generics, status
@@ -10,7 +12,8 @@ from videos.functions_utils import services
 from videos.models import Categorias, CodecUrls, StatusCodec, VideosUploaded
 from videos.serializers import (CategoryModelSerializer, CodecUrlsSerializer,
                                 VideosUpladedSerializer)
-
+from django.conf import settings
+from copy import deepcopy
 
 class CodeUrlsAPIView(generics.RetrieveAPIView):
     queryset = CodecUrls.objects.all()
@@ -54,39 +57,47 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
         return super().list(request, *args, **kwargs)
 
     def add_commands(self, *args, **kwargs):
-        services.COMMAND_YT_DLP.append(kwargs.get("url"))
-        services.COMMAND_YT_DLP.append(kwargs.get("output_flag"))
-        services.COMMAND_YT_DLP.append(kwargs.get("path"))
-        return services.COMMAND_YT_DLP
+        commands = deepcopy(services.COMMAND_YT_DLP)
+        commands.append(kwargs.get("url"))
+        commands.append(kwargs.get("output_flag"))
+        commands.append(kwargs.get("path"))
+        return commands
 
     def insert_commandos_from_str(self, url_):
-        static_directory = os.path.abspath("static/")
-        return self.add_commands(
+        commands =  self.add_commands(
             url=url_.url,
             output_flag="-o",
-            path=f"{static_directory}/{url_.id}.mp4",
+            path=f"{settings.MEDIA_ROOT}/videos/{url_.id}.mp4",
         )
+        logger.info(f"{settings.MEDIA_ROOT}/videos/{url_.id}.mp4")
+        logger.info(commands)
+        return commands
 
     def create_code_url(self):
         url_ = CodecUrls.objects.create(url=self.request.data.get("url"))
         url_.save()
         return url_
 
+
     def post(self, request, *args, **kwargs):
         url_ = self.create_code_url()
+        logger.info(f"  {kwargs}")
         comandos = self.insert_commandos_from_str(url_)
-
+        logs_directory = os.path.abspath("logs/")
         try:
-            services.SpCommand(command_list=comandos, tmp_file="test.txt")
-            time.sleep(3)
+            sp = services.SpCommand(command_list=comandos, tmp_file=f"{logs_directory}/{url_.id}.txt")
+            stdout = sp.call_command()
+            logger.info(f"Terminando de descargar video {url_}")
+
         except Exception as error:
             url_.status = StatusCodec.error
             url_.save()
+            logger.exception(f"{error}")
             return Response(
                 data=dict(error=str(error)), status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
         try:
-            with open(f"static/{url_.id}.mp4", "rb") as videop:
+            with open(f"{settings.MEDIA_ROOT}/videos/{url_.id}.mp4", "rb") as videop:
                 return self.get_video_codec(videop, url_)
         except Exception as error:
             return Response(
@@ -95,6 +106,7 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
 
     def get_video_codec(self, videop, url_):
         f_video = File(videop)
+        logger.info
         data = VideosUploaded.objects.create(video=f_video, title="Test", codecurl=url_)
 
         serializer = self.get_serializer(data)
