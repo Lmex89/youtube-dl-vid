@@ -7,14 +7,15 @@ import time
 
 COMMAND_YT_DLP = [
     "yt-dlp",
-    "-S",
-    "res,ext:mp4:m4a",
-    "--recode",
-    "mp4",
-    "--no-cache-dir",     # disables cache
+    "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]",
+    "-S", "res,ext:mp4:m4a",
+    "--merge-output-format", "mp4",
+    "--no-cache-dir",    # disables cache
     # "",
     # "-P ../../"
 ]
+
+
 
 class SpCommand:
     def __init__(self, command_list: List[str], tmp_file: str) -> None:
