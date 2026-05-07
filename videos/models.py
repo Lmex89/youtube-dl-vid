@@ -1,28 +1,20 @@
-from django.db import models
 import uuid
 
-from django_utils.choices import Choices, Choice
+from django.db import models
 
 
-class StatusCodec(Choices):
-    success = Choice(value=1, label="Exitoso")
-    pending = Choice(value=2, label="Pendiente")
-    error = Choice(value=3, label="Error")
+class StatusCodec(models.IntegerChoices):
+    SUCCESS = 1, "Exitoso"
+    PENDING = 2, "Pendiente"
+    ERROR = 3, "Error"
 
 
-# Create your models here.
 class BaseModel(models.Model):
-    id = models.AutoField(primary_key=True, unique=True)
-    created_at = models.DateTimeField(
-        auto_now_add=True,
-    )
-    updated_at = models.DateTimeField(
-        auto_now=True,
-    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
     visible = models.BooleanField(default=True)
 
     def soft_delete(self):
-        """soft  delete a model instance"""
         self.visible = False
         self.save()
 
@@ -33,24 +25,26 @@ class BaseModel(models.Model):
 
 class Categorias(BaseModel):
     id = models.UUIDField(primary_key=True, unique=True, default=uuid.uuid4)
-    title = models.CharField(max_length=250, null=False)
+    title = models.CharField(max_length=250)
+
 
 class CodecUrls(BaseModel):
     id = models.UUIDField(primary_key=True, unique=True, default=uuid.uuid4)
-    url = models.CharField(max_length=350, null=False)
-    status = models.PositiveSmallIntegerField(choices=StatusCodec.choices, default=StatusCodec.pending)
+    url = models.CharField(max_length=350)
+    status = models.PositiveSmallIntegerField(
+        choices=StatusCodec.choices, default=StatusCodec.PENDING
+    )
 
     def __str__(self):
         return f"id={self.id}, url={self.url} status={self.status}"
 
+
 class VideosUploaded(BaseModel):
     id = models.UUIDField(primary_key=True, unique=True, default=uuid.uuid4)
-    video = models.FileField(upload_to="videos/", blank=True, null=True)
-    title = models.CharField(max_length=250, null=False, default="test")
+    video_path = models.CharField(max_length=500, blank=True, null=True)
+    title = models.CharField(max_length=250, default="test")
     category = models.ForeignKey(Categorias, null=True, on_delete=models.SET_NULL)
     codecurl = models.ForeignKey(CodecUrls, null=True, on_delete=models.SET_NULL)
 
     def __str__(self):
-        return f"id={self.id}, video={self.video} title={self.title}"
-
-
+        return f"id={self.id}, video_path={self.video_path} title={self.title}"

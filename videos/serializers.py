@@ -13,7 +13,10 @@ class CodecUrlsSerializer(serializers.ModelSerializer):
         model = CodecUrls
         fields = "__all__"
 
+
 class VideosUpladedSerializer(serializers.ModelSerializer):
+    video = serializers.CharField(source="video_path", read_only=True)
+
     class Meta:
         model = VideosUploaded
-        fields = "__all__"
+        fields = ["id", "video", "title", "category", "codecurl", "created_at", "updated_at", "visible"]

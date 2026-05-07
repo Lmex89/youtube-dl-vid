@@ -1,7 +1,67 @@
-.*venv_*
-data/*
-*.pyc*
+# Python
+*.pyc
+*.pyo
+__pycache__/
 *.cpython*
-uploads/*
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.*venv_*
+venv/
+.venv/
+
+# Environment and secrets
+.env
+.env.*
+*.key
+*.pem
+*.cert
+*.crt
+*.secret
+credentials.json
+service-account.json
+secrets/
+
+# Database
+db.sqlite3
+data/*
+
+# Static and media
 static/*
+!static/.gitkeep
 staticfiles/*
+uploads/*
+media/*
+downloads/*
+
+# Logs
+logs/*
+*.log
+
+# IDE and OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Docker
+.docker/
+
+# Test and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.coverage.*
+nosetests.xml
+coverage.xml
+*.cover
+
+# Django
+*.mo
+*.pot

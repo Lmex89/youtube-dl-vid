@@ -1,27 +1,24 @@
-from __future__ import annotations
-import os
-import time
+from pathlib import Path
 
-from loguru import logger 
-from django.core.files import File
-from django.http import HttpResponse
+from django.conf import settings
+from django.http import FileResponse
+from loguru import logger
 from rest_framework import generics, status
 from rest_framework.response import Response
 
-from videos.functions_utils import services
+from videos.download import build_command, cleanup_old_downloads, run_download
 from videos.models import Categorias, CodecUrls, StatusCodec, VideosUploaded
-from videos.serializers import (CategoryModelSerializer, CodecUrlsSerializer,
-                                VideosUpladedSerializer)
-from django.conf import settings
-from copy import deepcopy
+from videos.serializers import (
+    CategoryModelSerializer,
+    CodecUrlsSerializer,
+    VideosUpladedSerializer,
+)
 
-class CodeUrlsAPIView(generics.RetrieveAPIView):
+
+class CodecUrlsDetailAPIView(generics.RetrieveAPIView):
     queryset = CodecUrls.objects.all()
     serializer_class = CodecUrlsSerializer
     permission_classes = ()
-
-    def get(self, request, *args, **kwargs):
-        return super().get(request, *args, **kwargs)
 
 
 class CodecUrlsListCreateAPIView(generics.ListCreateAPIView):
@@ -29,23 +26,11 @@ class CodecUrlsListCreateAPIView(generics.ListCreateAPIView):
     serializer_class = CodecUrlsSerializer
     permission_classes = ()
 
-    def get(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
-
-    def post(self, request, *args, **kwargs):
-        return super().create(request, *args, **kwargs)
-
 
 class CategoriasListCreateAPIView(generics.ListCreateAPIView):
     queryset = Categorias.objects.all()
     serializer_class = CategoryModelSerializer
     permission_classes = ()
-
-    def get(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
-
-    def post(self, request, *args, **kwargs):
-        return super().create(request, *args, **kwargs)
 
 
 class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
@@ -53,67 +38,44 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
     serializer_class = VideosUpladedSerializer
     permission_classes = ()
 
-    def get(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
-
-    def add_commands(self, *args, **kwargs):
-        commands = deepcopy(services.COMMAND_YT_DLP)
-        commands.append(kwargs.get("url"))
-        commands.append(kwargs.get("output_flag"))
-        commands.append(kwargs.get("path"))
-        return commands
-
-    def insert_commandos_from_str(self, url_):
-        commands =  self.add_commands(
-            url=url_.url,
-            output_flag="-o",
-            path=f"{settings.MEDIA_ROOT}/videos/{url_.id}.mp4",
-        )
-        logger.info(f"{settings.MEDIA_ROOT}/videos/{url_.id}.mp4")
-        logger.info(commands)
-        return commands
-
-    def create_code_url(self):
-        url_ = CodecUrls.objects.create(url=self.request.data.get("url"))
-        url_.save()
-        return url_
-
-
     def post(self, request, *args, **kwargs):
-        url_ = self.create_code_url()
-        logger.info(f"  {kwargs}")
-        comandos = self.insert_commandos_from_str(url_)
-        logs_directory = os.path.abspath("logs/")
-        try:
-            sp = services.SpCommand(command_list=comandos, tmp_file=f"{logs_directory}/{url_.id}.txt")
-            stdout = sp.call_command()
-            logger.info(f"Terminando de descargar video {url_}")
-
-        except Exception as error:
-            url_.status = StatusCodec.error
-            url_.save()
-            logger.exception(f"{error}")
+        url = request.data.get("url")
+        if not url:
             return Response(
-                data=dict(error=str(error)), status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-        try:
-            with open(f"{settings.MEDIA_ROOT}/videos/{url_.id}.mp4", "rb") as videop:
-                return self.get_video_codec(videop, url_)
-        except Exception as error:
-            return Response(
-                data=dict(error=str(error)), status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                data={"error": "url is required"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-    def get_video_codec(self, videop, url_):
-        f_video = File(videop)
-        logger.info
-        data = VideosUploaded.objects.create(video=f_video, title="Test", codecurl=url_)
+        codecurl = CodecUrls.objects.create(url=url)
+        cleanup_old_downloads(codecurl)
 
-        serializer = self.get_serializer(data)
+        downloads_dir = Path(settings.DOWNLOADS_DIR)
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        output_path = downloads_dir / f"{codecurl.id}.mp4"
+        log_path = Path("logs") / f"{codecurl.id}.txt"
 
-        url_.status = StatusCodec.success
-        url_.save()
+        try:
+            command = build_command(url, output_path)
+            logger.info(command)
+            run_download(command, log_path)
+        except Exception as exc:
+            codecurl.status = StatusCodec.ERROR
+            codecurl.save()
+            logger.exception(str(exc))
+            return Response(
+                data={"error": str(exc)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
+        uploaded = VideosUploaded.objects.create(
+            video_path=str(output_path),
+            title="Test",
+            codecurl=codecurl,
+        )
+        codecurl.status = StatusCodec.SUCCESS
+        codecurl.save()
+
+        serializer = self.get_serializer(uploaded)
         return Response(data=serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -123,10 +85,16 @@ class VideosUploadedDetailAPIView(generics.RetrieveAPIView):
     permission_classes = ()
 
     def get(self, request, *args, **kwargs):
-        video_codec = self.get_queryset().filter(pk=kwargs.get("pk")).first()
-        file = video_codec.video
-        with file.open() as f:
-            file_content = f.read()
-        response = HttpResponse(file_content, content_type="application/octet-stream")
-        response["Content-Disposition"] = f'attachment; filename="{video_codec.id}.mp4"'
+        upload = self.get_object()
+        file_path = Path(upload.video_path)
+        if not file_path.exists():
+            return Response(
+                data={"error": "file not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        response = FileResponse(
+            open(file_path, "rb"),
+            as_attachment=True,
+            filename=f"{upload.id}.mp4",
+        )
         return response
