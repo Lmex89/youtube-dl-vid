@@ -16,7 +16,7 @@ services:
     build: .
     #command: bash -c "gunicorn bookproject.wsgi:application --timeout 120 --workers=3 --threads=3 --worker-connections=1000 --bind 0.0.0.0:8000 "
     #command: "python manage.py runserver"
-    entrypoint: ["bash","docker-entrypoint.sh"]
+    entrypoint: ["sh","docker-entrypoint.sh"]
     volumes:
       - .:/code
     ports:

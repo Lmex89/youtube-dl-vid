@@ -1,47 +1,60 @@
 #syntax=docker/dockerfile:1
 
-# ===== Builder stage: create virtual environment and install packages =====
-FROM python:3.12-slim AS builder
+# ===== Builder stage: create wheels and install packages =====
+FROM python:3.12-alpine AS builder
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apk add --no-cache \
+    build-base \
+    postgresql-dev \
+    pkgconfig
 
 WORKDIR /build
 
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+COPY requirements.txt ./requirements.txt
 
-COPY requirements.txt .
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip && \
-    pip install -r requirements.txt yt-dlp
+RUN pip install --upgrade pip setuptools wheel && \
+    pip wheel --disable-pip-version-check --no-cache-dir \
+        --wheel-dir /wheels \
+        -r requirements.txt yt-dlp
 
 # ===== Final runtime stage: minimal image with only runtime deps =====
-FROM python:3.12-slim
+FROM python:3.12-alpine
 
-LABEL Author="Luis Mex"
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TZ=America/Mexico_City
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apk add --no-cache \
     ffmpeg \
     postgresql-client \
-    && rm -rf /var/lib/apt/lists/*
+    tzdata && \
+    cp /usr/share/zoneinfo/America/Mexico_City /etc/localtime && \
+    echo "America/Mexico_City" > /etc/timezone
 
-RUN mkdir -p /var/log/gunicorn /code/downloads
-
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+RUN adduser -D -s /sbin/nologin appuser
 
 WORKDIR /code
-COPY . /code
 
-RUN chmod +x docker-entrypoint.sh && \
-    chown www-data:www-data /var/log/gunicorn
+COPY --from=builder /wheels /wheels
+COPY requirements.txt /tmp/requirements.txt
 
-# Switch to non-root user for production deployments (remove bind mount first).
-# USER www-data
+RUN pip install --no-cache-dir --no-compile --no-index \
+    --find-links=/wheels -r /tmp/requirements.txt && \
+    rm -rf /wheels /tmp/requirements.txt
 
-ENTRYPOINT ["bash", "/code/docker-entrypoint.sh"]
+COPY --chown=appuser:appuser . /code
+
+RUN mkdir -p /var/log/gunicorn /code/downloads && \
+    chown -R appuser:appuser /var/log/gunicorn /code/downloads && \
+    chmod +x docker-entrypoint.sh
+
+# Keep running as root for bind mount compatibility
+# USER appuser
+
+EXPOSE 8000
+
+ENTRYPOINT ["sh", "/code/docker-entrypoint.sh"]
