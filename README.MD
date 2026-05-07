@@ -61,8 +61,8 @@ docker-compose.yaml
 ## Tech stack
 
 - Python 3.12, Django 4.2, Django REST Framework 3.15
-- PostgreSQL, psycopg[binary] 3.1
+- PostgreSQL, psycopg[binary] 3.1 (musllinux wheels for Alpine)
 - yt-dlp + ffmpeg (installed in Docker image)
 - Gunicorn, whitenoise 6.6, django-cors-headers
 - Loguru for application logging
-- Multi-stage Docker build (slim base, BuildKit cache mounts)
+- Multi-stage Docker build (Alpine base, wheel-based install)

@@ -41,5 +41,8 @@ docker compose up --build
 - yt-dlp merges best video+audio ≤720p into MP4; requires ffmpeg (installed in Dockerfile)
 - Videos are downloaded to `downloads/` and streamed via `FileResponse`; old downloads for the same URL are cleaned up automatically
 - Logging: Loguru to stdout + `/var/log/gunicorn/app.log`; Django logging to `/var/log/gunicorn/django.log`
-- Multi-stage Docker build: `python:3.12-slim` builder (venv + pip with BuildKit cache) → slim runtime with only ffmpeg + postgresql-client
-- `psycopg[binary]` replaces `psycopg2` — no compiler dependencies in the image
+- Multi-stage Docker build: `python:3.12-alpine` builder (wheel-based install) → minimal runtime with ffmpeg + postgresql-client
+- `psycopg[binary]` replaces `psycopg2` — uses musllinux wheels on Alpine
+- Non-root `appuser` created (runs as root for bind mount compatibility)
+- Wheel-based pip install pattern (CFE style) — builds wheels in builder stage, installs from local wheels in runtime
+- Timezone set to `America/Mexico_City` via ENV + tzdata
