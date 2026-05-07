@@ -1,0 +1,28 @@
+# Git
+.git/
+.gitignore
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment and secrets
+.env
+.env.*
+
+# Runtime data (generated at container runtime)
+data/
+downloads/
+logs/
+media/
+staticfiles/
+
+# Docs and config
+*.md
+*.yaml
+LICENSE
+
+# IDE
+.vscode/
+.idea/
