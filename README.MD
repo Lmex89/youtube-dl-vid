@@ -1,6 +1,6 @@
 # youtube-dl-vid
 
-Django 3.2 REST API that downloads YouTube videos via yt-dlp.
+Django 4.2 REST API that downloads YouTube videos via yt-dlp.
 
 ## Quick start
 
@@ -54,15 +54,15 @@ docker-compose.yaml
 
 - **`videos/`** — single Django app with models, views, serializers, and yt-dlp integration
 - **`Youtube_dl_vid/`** — project settings, URL routing, wsgi/asgi entrypoints
-- **`videos/functions_utils/services.py`** — yt-dlp subprocess wrapper
-- **`media/videos/`** — downloaded video storage
-- **`logs/`** — per-download log files
-- **`docker-entrypoint.sh`** — runs `collectstatic` then starts gunicorn
+- **`videos/download.py`** — yt-dlp command builder, subprocess runner, and download cleanup
+- **`downloads/`** — downloaded videos stored here by yt-dlp, streamed via `FileResponse`
+- **`docker-entrypoint.sh`** — runs `makemigrations`, `migrate`, `collectstatic`, then gunicorn
 
 ## Tech stack
 
-- Python 3.11, Django 3.2, Django REST Framework
-- PostgreSQL, psycopg2
+- Python 3.12, Django 4.2, Django REST Framework 3.15
+- PostgreSQL, psycopg[binary] 3.1
 - yt-dlp + ffmpeg (installed in Docker image)
-- Gunicorn, whitenoise, django-cors-headers
+- Gunicorn, whitenoise 6.6, django-cors-headers
 - Loguru for application logging
+- Multi-stage Docker build (slim base, BuildKit cache mounts)
