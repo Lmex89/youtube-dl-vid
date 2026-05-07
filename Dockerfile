@@ -43,7 +43,7 @@ COPY --from=builder /wheels /wheels
 COPY requirements.txt /tmp/requirements.txt
 
 RUN pip install --no-cache-dir --no-compile --no-index \
-    --find-links=/wheels -r /tmp/requirements.txt && \
+    --find-links=/wheels -r /tmp/requirements.txt yt-dlp && \
     rm -rf /wheels /tmp/requirements.txt
 
 COPY --chown=appuser:appuser . /code
