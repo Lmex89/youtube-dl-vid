@@ -48,8 +48,8 @@ RUN pip install --no-cache-dir --no-compile --no-index \
 
 COPY --chown=appuser:appuser . /code
 
-RUN mkdir -p /var/log/gunicorn /code/downloads && \
-    chown -R appuser:appuser /var/log/gunicorn /code/downloads && \
+RUN mkdir -p /var/log/gunicorn /code/downloads /code/logs && \
+    chown -R appuser:appuser /var/log/gunicorn /code/downloads /code/logs && \
     chmod +x docker-entrypoint.sh
 
 # Keep running as root for bind mount compatibility

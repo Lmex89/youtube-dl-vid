@@ -47,6 +47,8 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "Youtube_dl_vid.middleware.APILoggingMiddleware",
+    "Youtube_dl_vid.db_logging_middleware.SlowQueryLoggingMiddleware",
 ]
 
 ROOT_URLCONF = "Youtube_dl_vid.urls"
@@ -98,17 +100,75 @@ AUTH_PASSWORD_VALIDATORS = [
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
+    "formatters": {
+        "json": {
+            "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
+            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        },
+        "verbose": {
+            "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
+            "style": "{",
+        },
+        "simple": {
+            "format": "{levelname} {message}",
+            "style": "{",
+        },
+    },
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
+            "formatter": "json",
         },
-        "file": {
+        "django_file": {
             "class": "logging.FileHandler",
             "filename": "/var/log/gunicorn/django.log",
+            "formatter": "json",
+        },
+        "requests_file": {
+            "class": "logging.FileHandler",
+            "filename": "/var/log/gunicorn/django_requests.log",
+            "formatter": "json",
+        },
+        "db_file": {
+            "class": "logging.FileHandler",
+            "filename": "/var/log/gunicorn/django_db.log",
+            "formatter": "json",
+        },
+        "slow_queries_file": {
+            "class": "logging.FileHandler",
+            "filename": "/var/log/gunicorn/django_slow_queries.log",
+            "formatter": "json",
+        },
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console", "django_file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "django.request": {
+            "handlers": ["console", "requests_file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "django.db.backends": {
+            "handlers": ["console", "db_file"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+        "django.security": {
+            "handlers": ["console", "django_file"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        "videos": {
+            "handlers": ["console", "django_file"],
+            "level": "DEBUG",
+            "propagate": False,
         },
     },
     "root": {
-        "handlers": ["console", "file"],
+        "handlers": ["console", "django_file"],
         "level": "INFO",
     },
 }
@@ -139,3 +199,7 @@ DOWNLOADS_DIR = BASE_DIR / "downloads"
 
 CSRF_COOKIE_SECURE = False
 SESSION_COOKIE_SECURE = False
+
+REST_FRAMEWORK = {
+    'EXCEPTION_HANDLER': 'Youtube_dl_vid.exceptions.custom_exception_handler',
+}
