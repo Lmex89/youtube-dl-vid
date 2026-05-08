@@ -475,9 +475,27 @@ docker compose logs -f web
 docker compose logs db
 ```
 
-Log files inside container:
-- Application logs: `/var/log/gunicorn/` (via Loguru)
-- Django logs: stdout + `/var/log/gunicorn/django.log`
+All application logs are inside the container at `/var/log/gunicorn/` in JSON format:
+
+| File | Content | Level |
+|---|---|---|
+| `app.log` | Loguru application logs (30-day retention) | INFO+ |
+| `django.log` | Django app logs | INFO+ |
+| `django_requests.log` | HTTP request/response traces | INFO |
+| `django_db.log` | Database query logs | DEBUG |
+| `django_slow_queries.log` | Queries exceeding 500ms | WARNING |
+
+**Check logs inside the container:**
+```bash
+# Tail all Django logs
+docker compose exec web tail -f /var/log/gunicorn/django.log
+
+# Watch request logs
+docker compose exec web tail -f /var/log/gunicorn/django_requests.log
+
+# Monitor slow queries
+docker compose exec web tail -f /var/log/gunicorn/django_slow_queries.log
+```
 
 ### Running Django Shell
 

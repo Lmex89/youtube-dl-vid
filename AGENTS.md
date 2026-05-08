@@ -40,7 +40,13 @@ docker compose up --build
 - `collectstatic` runs on every container start (output to `staticfiles/`)
 - yt-dlp merges best video+audio ≤720p into MP4; requires ffmpeg (installed in Dockerfile)
 - Videos are downloaded to `downloads/` and streamed via `FileResponse`; old downloads for the same URL are cleaned up automatically
-- Logging: Loguru to stdout + `/var/log/gunicorn/app.log`; Django logging to `/var/log/gunicorn/django.log`
+- Logging (JSON format) at `/var/log/gunicorn/`:
+  - `app.log` — Loguru app logs (30-day retention, INFO+)
+  - `django.log` — Django app logs (INFO+)
+  - `django_requests.log` — HTTP request/response traces (INFO)
+  - `django_db.log` — Database query logs (DEBUG)
+  - `django_slow_queries.log` — Queries >500ms (WARNING)
+- View logs: `docker compose exec web tail -f /var/log/gunicorn/<file>`
 - Multi-stage Docker build: `python:3.12-alpine` builder (wheel-based install) → minimal runtime with ffmpeg + postgresql-client
 - `psycopg[binary]` replaces `psycopg2` — uses musllinux wheels on Alpine
 - Non-root `appuser` created (runs as root for bind mount compatibility)
