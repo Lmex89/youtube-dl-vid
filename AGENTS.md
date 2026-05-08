@@ -21,14 +21,25 @@ docker compose up --build
 
 ## API (prefix: `/api/v1/yt/`)
 
-| Endpoint | Method | Purpose |
-|---|---|---|
-| `videos/` | POST | Submit URL → triggers yt-dlp download |
-| `videos/` | GET | List submitted URLs |
-| `videos/<uuid:pk>` | GET | Get URL download status |
-| `categorias/` | GET/POST | List/create categories |
-| `videos-uploaded/` | GET/POST | List/create uploaded video records |
-| `videos-uploaded/<uuid:pk>` | GET | Download video file |
+| Endpoint | Method | Purpose | Rate Limit |
+|---|---|---|---|
+| `videos/` | POST | Submit URL → triggers yt-dlp download | 5/m |
+| `videos/` | GET | List submitted URLs | 30/m |
+| `videos/<uuid:pk>` | GET | Get URL download status | 30/m |
+| `categorias/` | POST | Create category | 10/m |
+| `categorias/` | GET | List categories | 30/m |
+| `videos-uploaded/` | POST | Download video | 5/m |
+| `videos-uploaded/` | GET | List uploaded videos | 30/m |
+| `videos-uploaded/<uuid:pk>` | GET | Download video file | 10/m |
+
+## Rate Limiting
+
+- **Library**: `django-ratelimit~=3.0` with `block=True`
+- **Key**: `user_or_ip` (auth-ready; falls back to IP for anonymous)
+- **Cache**: LocMemCache (per-worker, approximate limits)
+- **Blocked response**: JSON `{"error": "rate limit exceeded", "detail": "..."}` with HTTP 429
+- **Logging**: Rate-limited requests are logged automatically via `custom_exception_handler` (structured JSON with request_id)
+- **Custom 429 view**: `videos.views.ratelimited_error`
 
 ## Key facts
 

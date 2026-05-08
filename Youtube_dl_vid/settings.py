@@ -49,6 +49,7 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "Youtube_dl_vid.middleware.APILoggingMiddleware",
     "Youtube_dl_vid.db_logging_middleware.SlowQueryLoggingMiddleware",
+    "django_ratelimit.middleware.RatelimitMiddleware",
 ]
 
 ROOT_URLCONF = "Youtube_dl_vid.urls"
@@ -203,3 +204,15 @@ SESSION_COOKIE_SECURE = False
 REST_FRAMEWORK = {
     'EXCEPTION_HANDLER': 'Youtube_dl_vid.exceptions.custom_exception_handler',
 }
+
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+    },
+    "ratelimit": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+    },
+}
+
+RATELIMIT_USE_CACHE = "ratelimit"
+RATELIMIT_VIEW = "videos.views.ratelimited_error"

@@ -3,8 +3,10 @@ import json
 import time
 from typing import Any, Optional
 
+from django_ratelimit.exceptions import Ratelimited
 from rest_framework.views import exception_handler
 from rest_framework.exceptions import APIException
+from rest_framework.response import Response
 
 logger = logging.getLogger('videos')
 
@@ -18,6 +20,7 @@ def custom_exception_handler(exc: Exception, context: dict) -> Optional[Any]:
     - Includes request details (path, method, user, IP)
     - Adds request_id for correlation if available
     - Returns consistent error response format
+    - Handles Ratelimited exceptions with 429 status
     
     Configure in settings.py:
         REST_FRAMEWORK = {
@@ -45,6 +48,15 @@ def custom_exception_handler(exc: Exception, context: dict) -> Optional[Any]:
             'ip': _get_client_ip(request) if request else 'unknown',
         }
     }
+    
+    if isinstance(exc, Ratelimited):
+        log_data['level'] = 'WARNING'
+        log_data['event'] = 'rate_limit_exceeded'
+        logger.warning(json.dumps(log_data))
+        return Response(
+            {"error": "rate limit exceeded", "detail": str(exc)},
+            status=429,
+        )
     
     logger.exception(json.dumps(log_data))
     

@@ -3,7 +3,9 @@ import logging
 from pathlib import Path
 
 from django.conf import settings
-from django.http import FileResponse
+from django.http import FileResponse, JsonResponse
+from django.utils.decorators import method_decorator
+from django_ratelimit.decorators import ratelimit
 from loguru import logger
 from rest_framework import generics, status
 from rest_framework.response import Response
@@ -19,10 +21,21 @@ from videos.serializers import (
 logger = logging.getLogger('videos')
 
 
+def ratelimited_error(request, exception):
+    return JsonResponse(
+        {"error": "rate limit exceeded", "detail": str(exception)},
+        status=429,
+    )
+
+
 class CodecUrlsDetailAPIView(generics.RetrieveAPIView):
     queryset = CodecUrls.objects.all()
     serializer_class = CodecUrlsSerializer
     permission_classes = ()
+
+    @method_decorator(ratelimit(key='user_or_ip', rate='30/m', method='GET', block=True))
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
 
 
 class CodecUrlsListCreateAPIView(generics.ListCreateAPIView):
@@ -30,10 +43,12 @@ class CodecUrlsListCreateAPIView(generics.ListCreateAPIView):
     serializer_class = CodecUrlsSerializer
     permission_classes = ()
 
+    @method_decorator(ratelimit(key='user_or_ip', rate='30/m', method='GET', block=True))
     def get(self, request, *args, **kwargs):
         logger.debug("Listing all codec URLs")
         return super().get(request, *args, **kwargs)
 
+    @method_decorator(ratelimit(key='user_or_ip', rate='5/m', method='POST', block=True))
     def post(self, request, *args, **kwargs):
         url = request.data.get('url', 'unknown')
         logger.info(f"Creating codec URL entry: {url[:50]}...")
@@ -48,10 +63,12 @@ class CategoriasListCreateAPIView(generics.ListCreateAPIView):
     serializer_class = CategoryModelSerializer
     permission_classes = ()
 
+    @method_decorator(ratelimit(key='user_or_ip', rate='30/m', method='GET', block=True))
     def get(self, request, *args, **kwargs):
         logger.debug("Listing all categories")
         return super().get(request, *args, **kwargs)
 
+    @method_decorator(ratelimit(key='user_or_ip', rate='10/m', method='POST', block=True))
     def post(self, request, *args, **kwargs):
         category_name = request.data.get('name', 'unknown')
         logger.info(f"Creating category: {category_name}")
@@ -66,10 +83,12 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
     serializer_class = VideosUpladedSerializer
     permission_classes = ()
 
+    @method_decorator(ratelimit(key='user_or_ip', rate='30/m', method='GET', block=True))
     def get(self, request, *args, **kwargs):
         logger.debug("Listing all uploaded videos")
         return super().get(request, *args, **kwargs)
 
+    @method_decorator(ratelimit(key='user_or_ip', rate='5/m', method='POST', block=True))
     def post(self, request, *args, **kwargs):
         url = request.data.get("url")
         
@@ -152,6 +171,7 @@ class VideosUploadedDetailAPIView(generics.RetrieveAPIView):
     serializer_class = VideosUpladedSerializer
     permission_classes = ()
 
+    @method_decorator(ratelimit(key='user_or_ip', rate='10/m', method='GET', block=True))
     def get(self, request, *args, **kwargs):
         upload = self.get_object()
         file_path = Path(upload.video_path)
