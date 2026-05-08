@@ -46,3 +46,55 @@ docker compose up --build
 - Non-root `appuser` created (runs as root for bind mount compatibility)
 - Wheel-based pip install pattern (CFE style) — builds wheels in builder stage, installs from local wheels in runtime
 - Timezone set to `America/Mexico_City` via ENV + tzdata
+
+## Mandatory Logging Standards
+
+**ALL new code MUST implement structured JSON logging.** Use Context7 to look up best practices for your library/framework.
+
+### Requirements
+
+1. **Use Django standard logging** with `python-json-logger` for JSON output
+   ```python
+   import logging
+   logger = logging.getLogger('videos')
+   ```
+
+2. **Log levels by severity:**
+   - `DEBUG` — Detailed technical info (queries, internal state)
+   - `INFO` — Normal operations (create, complete, list)
+   - `WARNING` — Recoverable issues (slow requests >2s, missing files)
+   - `ERROR` — Failures (exceptions, validation errors)
+
+3. **JSON format for all logs:**
+   ```python
+   logger.info(json.dumps({
+       "event": "operation_name",
+       "key_detail": "value",
+       "user": username,
+   }))
+   ```
+
+4. **Sensitive data filtering** — NEVER log:
+   - Passwords, secrets, tokens, API keys
+   - Full authorization headers
+   - Credentials or auth tokens
+
+5. **Request ID tracking** — Use `APILoggingMiddleware` request_id for correlation
+
+6. **Performance thresholds:**
+   - Requests >2s: WARNING level
+   - Database queries >500ms: WARNING level (auto-logged by `SlowQueryLoggingMiddleware`)
+   - Downloads >500ms: WARNING level
+
+7. **Truncation** — Truncate long values (URLs, payloads) to 50-100 chars with `...`
+
+8. **Exception handling** — Use `custom_exception_handler` in REST_FRAMEWORK settings
+
+9. **Loguru** — Available for non-Django code; configure with `serialize=True` for JSON
+
+### Context7 Usage
+
+For any library integration, use Context7 to find logging best practices:
+```
+use context7 to show how to implement structured logging in [library]
+```
