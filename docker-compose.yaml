@@ -2,6 +2,7 @@
 services:
   db:
     image: postgres
+    restart: unless-stopped
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -14,6 +15,7 @@ services:
 
   web:
     build: .
+    restart: unless-stopped
     #command: bash -c "gunicorn bookproject.wsgi:application --timeout 120 --workers=3 --threads=3 --worker-connections=1000 --bind 0.0.0.0:8000 "
     #command: "python manage.py runserver"
     entrypoint: ["sh","docker-entrypoint.sh"]
