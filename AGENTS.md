@@ -8,110 +8,87 @@ Django 4.2 REST API that downloads YouTube videos via yt-dlp.
 docker compose up --build
 ```
 
-- Web server at `http://localhost:8011`
-- PostgreSQL at `localhost:51432`
+- Web at `http://localhost:8011`, PostgreSQL at `localhost:51432`
+- DB host inside container is `db` (not `localhost`)
+- `DEBUG=False` always; only gunicorn via `docker-entrypoint.sh` (no `runserver`)
+
+## Commands
+
+```bash
+docker compose exec web python manage.py <command>
+docker compose exec web python manage.py test          # tests (vanilla TestCase, no pytest)
+docker compose exec web tail -f /var/log/gunicorn/<file>  # logs
+```
+
+## API (`/api/v1/yt/`)
+
+| Endpoint | Method | Rate Limit |
+|---|---|---|
+| `videos/` | POST (submit URL) | 5/m |
+| `videos/` | GET (list) | 30/m |
+| `videos/<uuid:pk>` | GET (status) | 30/m |
+| `categorias/` | POST (create) | 10/m |
+| `categorias/` | GET (list) | 30/m |
+| `videos-uploaded/` | POST (download) | 5/m |
+| `videos-uploaded/` | GET (list) | 30/m |
+| `videos-uploaded/<uuid:pk>` | GET (download file) | 10/m |
 
 ## Architecture
 
-- **Django app** `videos/` — contains models, views, serializers, and yt-dlp integration
-- **`Youtube_dl_vid/`** — project settings, WSGI/ASGI entrypoints, URL routing
-- **`videos/download.py`** — yt-dlp command builder + subprocess runner + download cleanup
-- **`docker-entrypoint.sh`** — runs `makemigrations`, `migrate`, `collectstatic`, then `gunicorn`
-- **`downloads/`** — downloaded video files stored here by yt-dlp
-
-## API (prefix: `/api/v1/yt/`)
-
-| Endpoint | Method | Purpose | Rate Limit |
-|---|---|---|---|
-| `videos/` | POST | Submit URL → triggers yt-dlp download | 5/m |
-| `videos/` | GET | List submitted URLs | 30/m |
-| `videos/<uuid:pk>` | GET | Get URL download status | 30/m |
-| `categorias/` | POST | Create category | 10/m |
-| `categorias/` | GET | List categories | 30/m |
-| `videos-uploaded/` | POST | Download video | 5/m |
-| `videos-uploaded/` | GET | List uploaded videos | 30/m |
-| `videos-uploaded/<uuid:pk>` | GET | Download video file | 10/m |
-
-## Rate Limiting
-
-- **Library**: `django-ratelimit~=3.0` with `block=True`
-- **Key**: `user_or_ip` (auth-ready; falls back to IP for anonymous)
-- **Cache**: LocMemCache (per-worker, approximate limits)
-- **Blocked response**: JSON `{"error": "rate limit exceeded", "detail": "..."}` with HTTP 429
-- **Logging**: Rate-limited requests are logged automatically via `custom_exception_handler` (structured JSON with request_id)
-- **Custom 429 view**: `videos.views.ratelimited_error`
+- **`videos/`** — models, views, serializers, yt-dlp integration
+- **`Youtube_dl_vid/`** — project settings, logging config, middleware, URL routing
+- **`videos/download.py`** — yt-dlp command builder + subprocess runner + cleanup
+- **`docker-entrypoint.sh`** — runs `makemigrations` → `migrate` → `collectstatic` → `gunicorn`
+- **`downloads/`** — downloaded MP4 files; old downloads for same URL auto-cleaned
+- yt-dlp format: `bestvideo[height<=720]+bestaudio/best[height<=720]` merged to MP4 (requires ffmpeg)
 
 ## Key facts
 
-- **DEBUG=False** always; no `runserver` — only gunicorn via Docker entrypoint
-- DB hostname inside Docker is `db`, not `localhost`
-- **No lint / format / typecheck config** exists in the repo
-- Tests: only vanilla `django.test.TestCase` (no pytest), no test runner command defined
-- **Migrations are auto-applied** on container start (`makemigrations` + `migrate`)
-- `collectstatic` runs on every container start (output to `staticfiles/`)
-- yt-dlp merges best video+audio ≤720p into MP4; requires ffmpeg (installed in Dockerfile)
-- Videos are downloaded to `downloads/` and streamed via `FileResponse`; old downloads for the same URL are cleaned up automatically
-- Logging (JSON format) at `/var/log/gunicorn/`:
-  - `app.log` — Loguru app logs (30-day retention, INFO+)
-  - `django.log` — Django app logs (INFO+)
-  - `django_requests.log` — HTTP request/response traces (INFO)
-  - `django_db.log` — Database query logs (DEBUG)
-  - `django_slow_queries.log` — Queries >500ms (WARNING)
-- View logs: `docker compose exec web tail -f /var/log/gunicorn/<file>`
-- Multi-stage Docker build: `python:3.12-alpine` builder (wheel-based install) → minimal runtime with ffmpeg + postgresql-client
-- `psycopg[binary]` replaces `psycopg2` — uses musllinux wheels on Alpine
-- Non-root `appuser` created (runs as root for bind mount compatibility)
-- Wheel-based pip install pattern (CFE style) — builds wheels in builder stage, installs from local wheels in runtime
-- Timezone set to `America/Mexico_City` via ENV + tzdata
+- **Rate limiting**: `django-ratelimit~=4.1` with `block=True`, key=`user_or_ip`, LocMemCache, custom 429 view at `videos.views.ratelimited_error`
+- **Migrations auto-applied** on container start; create new ones with `docker compose exec web python manage.py makemigrations`
+- **No lint / format / typecheck config** exists
+- **Logging**: structured JSON via `python-json-logger` + Loguru (`serialize=True`) at `/var/log/gunicorn/`:
+  - `app.log` (Loguru, INFO+, 30-day retention), `django.log` (INFO+), `django_requests.log` (INFO), `django_db.log` (DEBUG), `django_slow_queries.log` (WARNING, >500ms)
+- `psycopg[binary]` (not `psycopg2`) — musllinux wheels for Alpine
+- Non-root `appuser` created but runs as root for bind mount compatibility
+- `collectstatic` runs every container start (output to `staticfiles/`)
+- `ALLOWED_HOSTS = ["*"]`, CORS open, no auth on endpoints
+- Timezone: `America/Mexico_City`
 
-## Mandatory Logging Standards
+## Logging standards for new code
 
-**ALL new code MUST implement structured JSON logging.** Use Context7 to look up best practices for your library/framework.
+- Use Django stdlib logging (`logging.getLogger('videos')`)
+- **ALL logs must be JSON** — `logger.info(json.dumps({"event": "name", "key": "val", ...}))`
+- Log levels: DEBUG (details), INFO (operations), WARNING (recoverable), ERROR (failures)
+- Sensitive data NEVER logged (passwords, tokens, secrets, auth headers)
+- Include `request_id` from `APILoggingMiddleware` for correlation
+- Truncate long values (URLs, payloads) to 50-100 chars
+- Downloads >500ms: WARNING; requests >2s: WARNING (auto-logged by middleware)
+- Exception handling uses `custom_exception_handler` (in `REST_FRAMEWORK` settings)
+- Loguru available for non-Django code with `serialize=True`
 
-### Requirements
+## Commit practices (mandatory)
 
-1. **Use Django standard logging** with `python-json-logger` for JSON output
-   ```python
-   import logging
-   logger = logging.getLogger('videos')
-   ```
+Follow Conventional Commits format:
 
-2. **Log levels by severity:**
-   - `DEBUG` — Detailed technical info (queries, internal state)
-   - `INFO` — Normal operations (create, complete, list)
-   - `WARNING` — Recoverable issues (slow requests >2s, missing files)
-   - `ERROR` — Failures (exceptions, validation errors)
-
-3. **JSON format for all logs:**
-   ```python
-   logger.info(json.dumps({
-       "event": "operation_name",
-       "key_detail": "value",
-       "user": username,
-   }))
-   ```
-
-4. **Sensitive data filtering** — NEVER log:
-   - Passwords, secrets, tokens, API keys
-   - Full authorization headers
-   - Credentials or auth tokens
-
-5. **Request ID tracking** — Use `APILoggingMiddleware` request_id for correlation
-
-6. **Performance thresholds:**
-   - Requests >2s: WARNING level
-   - Database queries >500ms: WARNING level (auto-logged by `SlowQueryLoggingMiddleware`)
-   - Downloads >500ms: WARNING level
-
-7. **Truncation** — Truncate long values (URLs, payloads) to 50-100 chars with `...`
-
-8. **Exception handling** — Use `custom_exception_handler` in REST_FRAMEWORK settings
-
-9. **Loguru** — Available for non-Django code; configure with `serialize=True` for JSON
-
-### Context7 Usage
-
-For any library integration, use Context7 to find logging best practices:
 ```
-use context7 to show how to implement structured logging in [library]
+<type>(<scope>): <subject>
+
+<body>
 ```
+
+- **Subject**: capitalized, imperative mood, ≤50 chars, no period
+- **Body**: wrap at 72 chars, explain **why** not what (the diff shows what)
+- **Types**: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `style`, `perf`
+- Use `git commit -s` (Signed-off-by) for attribution
+- One logical change per commit — no mixed concerns
+
+## SOLID principles (mandatory)
+
+All backend code must follow SOLID:
+
+1. **SRP** — One class/view/serializer = one responsibility. Split `videos/views.py` logic where appropriate.
+2. **OCP** — Extend via subclassing or composition, not by modifying existing classes. DRF generic views and model serializers already favor this.
+3. **LSP** — Subtypes must be substitutable for their base types. Don't override base behavior in ways that break callers.
+4. **ISP** — Keep interfaces narrow. Views should not depend on methods they don't use. Split large serializers.
+5. **DIP** — Depend on abstractions, not concretions. Use DRF's abstract views, pass dependencies via constructor/settings (e.g., `settings.DOWNLOADS_DIR`).
