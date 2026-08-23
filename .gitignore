@@ -49,6 +49,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+.codegraph/
 
 # Docker
 .docker/

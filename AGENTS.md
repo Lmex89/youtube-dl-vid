@@ -92,3 +92,12 @@ All backend code must follow SOLID:
 3. **LSP** — Subtypes must be substitutable for their base types. Don't override base behavior in ways that break callers.
 4. **ISP** — Keep interfaces narrow. Views should not depend on methods they don't use. Split large serializers.
 5. **DIP** — Depend on abstractions, not concretions. Use DRF's abstract views, pass dependencies via constructor/settings (e.g., `settings.DOWNLOADS_DIR`).
+
+## Codegraph (mandatory)
+
+Always use Codegraph tools for codebase exploration, symbol navigation, and impact analysis:
+
+1. **Context & symbol discovery** — Use `codegraph_context_for_task` and `codegraph_find_symbol` / `codegraph_search_symbols` to locate relevant code and symbols before making modifications.
+2. **Impact radius & callers** — Check `codegraph_get_impact_radius`, `codegraph_find_callers`, and `codegraph_find_callees` prior to refactoring, renaming, or deleting functions, classes, or models.
+3. **Dependency tracing** — Use `codegraph_trace_dependencies` and `codegraph_architecture_overview` to understand call chains and project structure.
+4. **Graph synchronization** — Run `codegraph_index_repo` or `codegraph_update_graph` when adding or restructuring files to keep the graph index up to date.
