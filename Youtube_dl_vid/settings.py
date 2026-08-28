@@ -101,75 +101,40 @@ AUTH_PASSWORD_VALIDATORS = [
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
-    "formatters": {
-        "json": {
-            "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
-            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
-        },
-        "verbose": {
-            "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
-            "style": "{",
-        },
-        "simple": {
-            "format": "{levelname} {message}",
-            "style": "{",
-        },
-    },
     "handlers": {
-        "console": {
-            "class": "logging.StreamHandler",
-            "formatter": "json",
-        },
-        "django_file": {
-            "class": "logging.FileHandler",
-            "filename": "/var/log/gunicorn/django.log",
-            "formatter": "json",
-        },
-        "requests_file": {
-            "class": "logging.FileHandler",
-            "filename": "/var/log/gunicorn/django_requests.log",
-            "formatter": "json",
-        },
-        "db_file": {
-            "class": "logging.FileHandler",
-            "filename": "/var/log/gunicorn/django_db.log",
-            "formatter": "json",
-        },
-        "slow_queries_file": {
-            "class": "logging.FileHandler",
-            "filename": "/var/log/gunicorn/django_slow_queries.log",
-            "formatter": "json",
+        "intercept": {
+            "()": "Youtube_dl_vid.logging_config.InterceptHandler",
         },
     },
     "loggers": {
         "django": {
-            "handlers": ["console", "django_file"],
+            "handlers": ["intercept"],
             "level": "INFO",
             "propagate": False,
         },
         "django.request": {
-            "handlers": ["console", "requests_file"],
+            "handlers": ["intercept"],
             "level": "INFO",
             "propagate": False,
         },
         "django.db.backends": {
-            "handlers": ["console", "db_file"],
+            "handlers": ["intercept"],
             "level": "DEBUG",
             "propagate": False,
         },
         "django.security": {
-            "handlers": ["console", "django_file"],
+            "handlers": ["intercept"],
             "level": "WARNING",
             "propagate": False,
         },
         "videos": {
-            "handlers": ["console", "django_file"],
+            "handlers": ["intercept"],
             "level": "DEBUG",
             "propagate": False,
         },
     },
     "root": {
-        "handlers": ["console", "django_file"],
+        "handlers": ["intercept"],
         "level": "INFO",
     },
 }

@@ -40,15 +40,17 @@ docker compose exec web tail -f /var/log/gunicorn/<file>  # logs
 - **`videos/download.py`** — yt-dlp command builder + subprocess runner + cleanup
 - **`docker-entrypoint.sh`** — runs `makemigrations` → `migrate` → `collectstatic` → `gunicorn`
 - **`downloads/`** — downloaded MP4 files; old downloads for same URL auto-cleaned
-- yt-dlp format: `bestvideo[height<=720]+bestaudio/best[height<=720]` merged to MP4 (requires ffmpeg)
+- yt-dlp format: `bestvideo[height<=720]+bestaudio/best[height<=720]/best` merged to MP4 (requires ffmpeg)
 
 ## Key facts
 
 - **Rate limiting**: `django-ratelimit~=4.1` with `block=True`, key=`user_or_ip`, LocMemCache, custom 429 view at `videos.views.ratelimited_error`
 - **Migrations auto-applied** on container start; create new ones with `docker compose exec web python manage.py makemigrations`
 - **No lint / format / typecheck config** exists
-- **Logging**: structured JSON via `python-json-logger` + Loguru (`serialize=True`) at `/var/log/gunicorn/`:
-  - `app.log` (Loguru, INFO+, 30-day retention), `django.log` (INFO+), `django_requests.log` (INFO), `django_db.log` (DEBUG), `django_slow_queries.log` (WARNING, >500ms)
+- **Logging**: structured JSON via Loguru (`serialize=True`) at `/var/log/gunicorn/`, with stdlib logs intercepted by `InterceptHandler`:
+  - `app.log` (INFO+, 30-day retention)
+  - `error.log` (ERROR+, 90-day retention)
+  - `debug.log` (DEBUG+, 7-day retention)
 - `psycopg[binary]` (not `psycopg2`) — musllinux wheels for Alpine
 - Non-root `appuser` created but runs as root for bind mount compatibility
 - `collectstatic` runs every container start (output to `staticfiles/`)
@@ -59,7 +61,7 @@ docker compose exec web tail -f /var/log/gunicorn/<file>  # logs
 
 - Use Django stdlib logging (`logging.getLogger('videos')`)
 - **ALL logs must be JSON** — `logger.info(json.dumps({"event": "name", "key": "val", ...}))`
-- Log levels: DEBUG (details), INFO (operations), WARNING (recoverable), ERROR (failures)
+- Log levels: DEBUG (details), INFO (operations), WARNING (recoverable), ERROR (failures), EXCEPTION (ERROR + traceback inside `except` blocks)
 - Sensitive data NEVER logged (passwords, tokens, secrets, auth headers)
 - Include `request_id` from `APILoggingMiddleware` for correlation
 - Truncate long values (URLs, payloads) to 50-100 chars
@@ -95,7 +97,7 @@ All backend code must follow SOLID:
 
 ## Codegraph (mandatory)
 
-Always use Codegraph tools for codebase exploration, symbol navigation, and impact analysis:
+Always use Codegraph tools for codebase exploration, symbol navigation, and impact analysis. Prefer Codegraph over built-in tools (Grep, Glob, Read, explore agent) for any codebase query; fall back to built-in tools only when the Codegraph query does not satisfy the request.
 
 1. **Context & symbol discovery** — Use `codegraph_context_for_task` and `codegraph_find_symbol` / `codegraph_search_symbols` to locate relevant code and symbols before making modifications.
 2. **Impact radius & callers** — Check `codegraph_get_impact_radius`, `codegraph_find_callers`, and `codegraph_find_callees` prior to refactoring, renaming, or deleting functions, classes, or models.

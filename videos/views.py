@@ -6,7 +6,6 @@ from django.conf import settings
 from django.http import FileResponse, JsonResponse
 from django.utils.decorators import method_decorator
 from django_ratelimit.decorators import ratelimit
-from loguru import logger
 from rest_framework import generics, status
 from rest_framework.response import Response
 
@@ -18,7 +17,7 @@ from videos.serializers import (
     VideosUpladedSerializer,
 )
 
-logger = logging.getLogger('videos')
+logger = logging.getLogger("videos")
 
 
 def ratelimited_error(request, exception):
@@ -45,16 +44,33 @@ class CodecUrlsListCreateAPIView(generics.ListCreateAPIView):
 
     @method_decorator(ratelimit(key='user_or_ip', rate='30/m', method='GET', block=True))
     def get(self, request, *args, **kwargs):
-        logger.debug("Listing all codec URLs")
+        logger.debug(
+            json.dumps({
+                "event": "list_codecurls_request",
+                "request_id": getattr(request, "request_id", "unknown"),
+            })
+        )
         return super().get(request, *args, **kwargs)
 
     @method_decorator(ratelimit(key='user_or_ip', rate='5/m', method='POST', block=True))
     def post(self, request, *args, **kwargs):
-        url = request.data.get('url', 'unknown')
-        logger.info(f"Creating codec URL entry: {url[:50]}...")
+        url = request.data.get("url", "unknown")
+        logger.info(
+            json.dumps({
+                "event": "create_codecurl_request",
+                "url_preview": url[:50] + "..." if len(url) > 50 else url,
+                "request_id": getattr(request, "request_id", "unknown"),
+            })
+        )
         response = super().post(request, *args, **kwargs)
         if response.status_code == 201:
-            logger.info(f"Codec URL created successfully: {response.data.get('id')}")
+            logger.info(
+                json.dumps({
+                    "event": "create_codecurl_success",
+                    "codecurl_id": str(response.data.get("id")),
+                    "request_id": getattr(request, "request_id", "unknown"),
+                })
+            )
         return response
 
 
@@ -65,16 +81,33 @@ class CategoriasListCreateAPIView(generics.ListCreateAPIView):
 
     @method_decorator(ratelimit(key='user_or_ip', rate='30/m', method='GET', block=True))
     def get(self, request, *args, **kwargs):
-        logger.debug("Listing all categories")
+        logger.debug(
+            json.dumps({
+                "event": "list_categories_request",
+                "request_id": getattr(request, "request_id", "unknown"),
+            })
+        )
         return super().get(request, *args, **kwargs)
 
     @method_decorator(ratelimit(key='user_or_ip', rate='10/m', method='POST', block=True))
     def post(self, request, *args, **kwargs):
-        category_name = request.data.get('name', 'unknown')
-        logger.info(f"Creating category: {category_name}")
+        category_name = request.data.get("name", "unknown")
+        logger.info(
+            json.dumps({
+                "event": "create_category_request",
+                "category_name": category_name,
+                "request_id": getattr(request, "request_id", "unknown"),
+            })
+        )
         response = super().post(request, *args, **kwargs)
         if response.status_code == 201:
-            logger.info(f"Category created successfully: {response.data.get('id')}")
+            logger.info(
+                json.dumps({
+                    "event": "create_category_success",
+                    "category_id": str(response.data.get("id")),
+                    "request_id": getattr(request, "request_id", "unknown"),
+                })
+            )
         return response
 
 
@@ -85,7 +118,12 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
 
     @method_decorator(ratelimit(key='user_or_ip', rate='30/m', method='GET', block=True))
     def get(self, request, *args, **kwargs):
-        logger.debug("Listing all uploaded videos")
+        logger.debug(
+            json.dumps({
+                "event": "list_uploaded_videos_request",
+                "request_id": getattr(request, "request_id", "unknown"),
+            })
+        )
         return super().get(request, *args, **kwargs)
 
     @method_decorator(ratelimit(key='user_or_ip', rate='5/m', method='POST', block=True))
@@ -97,7 +135,8 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
                 json.dumps({
                     "event": "video_download_failed",
                     "reason": "url_not_provided",
-                    "user": getattr(request.user, 'username', 'anonymous'),
+                    "user": getattr(request.user, "username", "anonymous"),
+                    "request_id": getattr(request, "request_id", "unknown"),
                 })
             )
             return Response(
@@ -109,15 +148,29 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
             json.dumps({
                 "event": "video_download_requested",
                 "url_preview": url[:50] + "..." if len(url) > 50 else url,
-                "user": getattr(request.user, 'username', 'anonymous'),
+                "user": getattr(request.user, "username", "anonymous"),
+                "request_id": getattr(request, "request_id", "unknown"),
             })
         )
 
         codecurl = CodecUrls.objects.create(url=url)
-        logger.debug(f"Created CodecUrls instance: {codecurl.id}")
-        
+        logger.debug(
+            json.dumps({
+                "event": "codecurl_created",
+                "codecurl_id": str(codecurl.id),
+                "request_id": getattr(request, "request_id", "unknown"),
+            })
+        )
+
         cleanup_old_downloads(codecurl)
-        logger.info(f"Cleaned up old downloads for URL: {url[:50]}...")
+        logger.info(
+            json.dumps({
+                "event": "old_downloads_cleaned",
+                "codecurl_id": str(codecurl.id),
+                "url_preview": url[:50] + "..." if len(url) > 50 else url,
+                "request_id": getattr(request, "request_id", "unknown"),
+            })
+        )
 
         downloads_dir = Path(settings.DOWNLOADS_DIR)
         downloads_dir.mkdir(parents=True, exist_ok=True)
@@ -126,7 +179,14 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
 
         try:
             command = build_command(url, output_path)
-            logger.debug(f"Built yt-dlp command: {' '.join(command[:4])}...")
+            logger.debug(
+                json.dumps({
+                    "event": "yt_dlp_command_built",
+                    "codecurl_id": str(codecurl.id),
+                    "command_preview": " ".join(command[:4]),
+                    "request_id": getattr(request, "request_id", "unknown"),
+                })
+            )
             run_download(command, log_path)
         except Exception as exc:
             logger.exception(
@@ -136,6 +196,7 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
                     "error_type": exc.__class__.__name__,
                     "codecurl_id": str(codecurl.id),
                     "url_preview": url[:50] + "..." if len(url) > 50 else url,
+                    "request_id": getattr(request, "request_id", "unknown"),
                 })
             )
             codecurl.status = StatusCodec.ERROR
@@ -159,6 +220,7 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
                 "uploaded_id": str(uploaded.id),
                 "codecurl_id": str(codecurl.id),
                 "video_path": str(output_path),
+                "request_id": getattr(request, "request_id", "unknown"),
             })
         )
 
@@ -181,29 +243,32 @@ class VideosUploadedDetailAPIView(generics.RetrieveAPIView):
                 "event": "video_file_download_requested",
                 "upload_id": str(upload.id),
                 "video_path": str(file_path),
-                "user": getattr(request.user, 'username', 'anonymous'),
+                "user": getattr(request.user, "username", "anonymous"),
+                "request_id": getattr(request, "request_id", "unknown"),
             })
         )
-        
+
         if not file_path.exists():
             logger.warning(
                 json.dumps({
                     "event": "video_file_not_found",
                     "upload_id": str(upload.id),
                     "video_path": str(file_path),
+                    "request_id": getattr(request, "request_id", "unknown"),
                 })
             )
             return Response(
                 data={"error": "file not found"},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        
+
         logger.info(
             json.dumps({
                 "event": "video_file_streaming",
                 "upload_id": str(upload.id),
                 "filename": file_path.name,
                 "size_bytes": file_path.stat().st_size,
+                "request_id": getattr(request, "request_id", "unknown"),
             })
         )
         

@@ -92,11 +92,8 @@ class APILoggingMiddleware:
         }
         
         if duration > self.SLOW_REQUEST_THRESHOLD:
-            log_data['context']['slow_request'] = True
-            logger.warning(
-                f"Slow response: {duration:.2f}s for {request.method} {request.path}",
-                extra=log_data
-            )
+            log_data["context"]["slow_request"] = True
+            logger.warning(json.dumps(log_data))
         else:
             logger.log(logging_level, json.dumps(log_data))
     

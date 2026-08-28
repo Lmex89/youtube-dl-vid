@@ -298,7 +298,7 @@ youtube-dl-vid/
 ### Video Processing
 - **yt-dlp 2026.03.17** — YouTube video downloader
 - **ffmpeg 8.0** — Video/audio format conversion and merging
-- Download format: `bestvideo[height<=720]+bestaudio/best[height<=720]` merged to MP4
+- Download format: `bestvideo[height<=720]+bestaudio/best[height<=720]/best` merged to MP4
 
 ### Infrastructure
 - **Docker** — Containerization with multi-stage build
@@ -384,8 +384,8 @@ Default Docker bridge network with automatic DNS resolution between containers. 
 Edit `videos/download.py` to modify yt-dlp options:
 
 ```python
-# Current format selection (720p max, MP4 output)
-format_spec = "bestvideo[height<=720]+bestaudio/best[height<=720]"
+# Current format selection (720p max with fallback, MP4 output)
+format_spec = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
 output_format = "mp4"
 
 # To download 1080p:
@@ -477,25 +477,98 @@ docker compose logs db
 
 All application logs are inside the container at `/var/log/gunicorn/` in JSON format:
 
-| File | Content | Level |
-|---|---|---|
-| `app.log` | Loguru application logs (30-day retention) | INFO+ |
-| `django.log` | Django app logs | INFO+ |
-| `django_requests.log` | HTTP request/response traces | INFO |
-| `django_db.log` | Database query logs | DEBUG |
-| `django_slow_queries.log` | Queries exceeding 500ms | WARNING |
+| File | Content | Level | Retention |
+|---|---|---|---|
+| `app.log` | Application and Django logs | INFO+ | 30 days |
+| `error.log` | Errors and exceptions | ERROR+ | 90 days |
+| `debug.log` | Debug-level diagnostics | DEBUG+ | 7 days |
 
 **Check logs inside the container:**
 ```bash
-# Tail all Django logs
-docker compose exec web tail -f /var/log/gunicorn/django.log
+# Tail application logs (INFO+)
+docker compose exec web tail -f /var/log/gunicorn/app.log
 
-# Watch request logs
-docker compose exec web tail -f /var/log/gunicorn/django_requests.log
+# Tail error logs (ERROR+)
+docker compose exec web tail -f /var/log/gunicorn/error.log
 
-# Monitor slow queries
-docker compose exec web tail -f /var/log/gunicorn/django_slow_queries.log
+# Tail debug logs (DEBUG+)
+docker compose exec web tail -f /var/log/gunicorn/debug.log
 ```
+
+### Logging Standards (Mandatory)
+
+All code in this project must follow the structured logging standards below. They are enforced by the Loguru-based configuration in `Youtube_dl_vid/logging_config.py`.
+
+#### Logger Selection
+
+- **Django code** (views, middleware, serializers, models, exceptions): use the standard library logger.
+  ```python
+  import logging
+  logger = logging.getLogger("videos")
+  ```
+- **Non-Django / standalone modules** (e.g. `videos/download.py`): use Loguru directly.
+  ```python
+  from loguru import logger
+  ```
+
+In both cases, logs are routed through the same Loguru sinks and output as JSON from file sinks.
+
+#### Log Levels
+
+Use the level that matches the situation:
+
+| Level | When to use |
+|---|---|
+| `DEBUG` | Detailed diagnostic information, request/response internals, command building, cleanup details. |
+| `INFO` | Normal operations: request received, download started, record created, file served. |
+| `WARNING` | Recoverable issues or notable events: missing URL, file not found, slow request (>2s), slow query (>500ms), rate limit hit. |
+| `ERROR` | Failures that prevent an operation from succeeding: yt-dlp non-zero exit, unhandled exception. |
+| `EXCEPTION` | Same as `ERROR` but always includes the exception traceback. Use inside `except` blocks. |
+
+#### JSON Structure
+
+All log records emitted by application code must be valid JSON strings. Use `json.dumps({...})` with at least an `event` key:
+
+```python
+logger.info(json.dumps({
+    "event": "video_download_requested",
+    "url_preview": url[:50] + "..." if len(url) > 50 else url,
+    "request_id": getattr(request, "request_id", "unknown"),
+}))
+```
+
+Exception logging:
+
+```python
+logger.exception(json.dumps({
+    "event": "video_download_failed",
+    "error": str(exc),
+    "error_type": exc.__class__.__name__,
+    "request_id": getattr(request, "request_id", "unknown"),
+}))
+```
+
+#### Correlation
+
+Include `request_id` from `APILoggingMiddleware` on every log emitted during an HTTP request:
+
+```python
+"request_id": getattr(request, "request_id", "unknown")
+```
+
+#### Security
+
+Never log sensitive values: passwords, tokens, API keys, auth headers, secrets. The middleware already redacts common sensitive fields from request bodies.
+
+#### Log Files
+
+| File | Level | Retention | Format |
+|---|---|---|---|
+| `/var/log/gunicorn/app.log` | INFO+ | 30 days | JSON |
+| `/var/log/gunicorn/error.log` | ERROR+ | 90 days | JSON |
+| `/var/log/gunicorn/debug.log` | DEBUG+ | 7 days | JSON |
+
+Console output is human-readable and includes DEBUG+ messages for local development.
 
 ### Running Django Shell
 

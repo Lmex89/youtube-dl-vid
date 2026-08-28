@@ -1,5 +1,4 @@
 import json
-import logging
 import subprocess as sp
 import time
 from pathlib import Path
@@ -9,11 +8,9 @@ from loguru import logger
 
 from videos.models import CodecUrls, VideosUploaded
 
-logger = logging.getLogger('videos')
-
 COMMAND_YT_DLP = [
     "yt-dlp",
-    "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]",
+    "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
     "-S", "res,ext:mp4:m4a",
     "--merge-output-format", "mp4",
     "--no-cache-dir",
