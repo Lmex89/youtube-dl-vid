@@ -9,8 +9,8 @@ from django_ratelimit.decorators import ratelimit
 from rest_framework import generics, status
 from rest_framework.response import Response
 
-from videos.download import build_command, cleanup_old_downloads, run_download
-from videos.models import Categorias, CodecUrls, StatusCodec, VideosUploaded
+from videos.download import cleanup_old_downloads, start_download_async
+from videos.models import Categorias, CodecUrls, VideosUploaded
 from videos.serializers import (
     CategoryModelSerializer,
     CodecUrlsSerializer,
@@ -176,56 +176,32 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
         downloads_dir.mkdir(parents=True, exist_ok=True)
         output_path = downloads_dir / f"{codecurl.id}.mp4"
         log_path = Path("logs") / f"{codecurl.id}.txt"
+        request_id = getattr(request, "request_id", "unknown")
 
-        try:
-            command = build_command(url, output_path)
-            logger.debug(
-                json.dumps({
-                    "event": "yt_dlp_command_built",
-                    "codecurl_id": str(codecurl.id),
-                    "command_preview": " ".join(command[:4]),
-                    "request_id": getattr(request, "request_id", "unknown"),
-                })
-            )
-            run_download(command, log_path)
-        except Exception as exc:
-            logger.exception(
-                json.dumps({
-                    "event": "video_download_failed",
-                    "error": str(exc),
-                    "error_type": exc.__class__.__name__,
-                    "codecurl_id": str(codecurl.id),
-                    "url_preview": url[:50] + "..." if len(url) > 50 else url,
-                    "request_id": getattr(request, "request_id", "unknown"),
-                })
-            )
-            codecurl.status = StatusCodec.ERROR
-            codecurl.save()
-            return Response(
-                data={"error": str(exc)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-        uploaded = VideosUploaded.objects.create(
-            video_path=str(output_path),
-            title="Test",
-            codecurl=codecurl,
+        start_download_async(
+            codecurl,
+            url,
+            output_path,
+            log_path,
+            request_id=request_id,
         )
-        codecurl.status = StatusCodec.SUCCESS
-        codecurl.save()
-
         logger.info(
             json.dumps({
-                "event": "video_download_completed",
-                "uploaded_id": str(uploaded.id),
+                "event": "video_download_started",
                 "codecurl_id": str(codecurl.id),
-                "video_path": str(output_path),
-                "request_id": getattr(request, "request_id", "unknown"),
+                "url_preview": url[:50] + "..." if len(url) > 50 else url,
+                "request_id": request_id,
             })
         )
 
-        serializer = self.get_serializer(uploaded)
-        return Response(data=serializer.data, status=status.HTTP_201_CREATED)
+        return Response(
+            data={
+                "id": str(codecurl.id),
+                "status": "pending",
+                "url": url,
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class VideosUploadedDetailAPIView(generics.RetrieveAPIView):

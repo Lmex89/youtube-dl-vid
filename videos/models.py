@@ -1,5 +1,6 @@
 import uuid
 
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 
@@ -33,6 +34,10 @@ class CodecUrls(BaseModel):
     url = models.CharField(max_length=350)
     status = models.PositiveSmallIntegerField(
         choices=StatusCodec.choices, default=StatusCodec.PENDING
+    )
+    progress = models.FloatField(
+        default=0.0,
+        validators=[MinValueValidator(0.0), MaxValueValidator(100.0)],
     )
 
     def __str__(self):

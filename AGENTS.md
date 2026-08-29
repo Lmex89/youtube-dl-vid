@@ -26,26 +26,34 @@ docker compose exec web tail -f /var/log/gunicorn/<file>  # logs
 |---|---|---|
 | `videos/` | POST (submit URL) | 5/m |
 | `videos/` | GET (list) | 30/m |
-| `videos/<uuid:pk>` | GET (status) | 30/m |
+| `videos/<uuid:pk>` | GET (status + progress) | 30/m |
 | `categorias/` | POST (create) | 10/m |
 | `categorias/` | GET (list) | 30/m |
-| `videos-uploaded/` | POST (download) | 5/m |
+| `videos-uploaded/` | POST (async download → 202) | 5/m |
 | `videos-uploaded/` | GET (list) | 30/m |
 | `videos-uploaded/<uuid:pk>` | GET (download file) | 10/m |
+
+**Download flow (async):** `POST videos-uploaded/` starts a background thread and
+returns `202 {"id": <codecurl_uuid>, "status": "pending", "url": ...}`. Poll
+`GET videos/<uuid:pk>` for status (`2`=downloading, `1`=success, `3`=error) and
+`progress` (real yt-dlp download % 0-100). A `VideosUploaded` record is created
+only after the download succeeds.
 
 ## Architecture
 
 - **`videos/`** — models, views, serializers, yt-dlp integration
 - **`Youtube_dl_vid/`** — project settings, logging config, middleware, URL routing
-- **`videos/download.py`** — yt-dlp command builder + subprocess runner + cleanup
+- **`videos/download.py`** — yt-dlp command builder + subprocess runner + async background thread + progress tracking + cleanup
 - **`docker-entrypoint.sh`** — runs `makemigrations` → `migrate` → `collectstatic` → `gunicorn`
 - **`downloads/`** — downloaded MP4 files; old downloads for same URL auto-cleaned
-- yt-dlp format: `bestvideo[height<=720]+bestaudio/best[height<=720]/best` merged to MP4 (requires ffmpeg)
+- Downloads run in a daemon thread (`start_download_async`) that updates `CodecUrls.progress` in DB in real time; the thread is tracked in a module-level registry keyed by codecurl id
+- yt-dlp format: `bestvideo[height<=720]+bestaudio/best[height<=720]/best` merged to MP4 (requires ffmpeg); `--newline` enables per-line progress output parsed by `PROGRESS_RE`
 
 ## Key facts
 
 - **Rate limiting**: `django-ratelimit~=4.1` with `block=True`, key=`user_or_ip`, LocMemCache, custom 429 view at `videos.views.ratelimited_error`
 - **Migrations auto-applied** on container start; create new ones with `docker compose exec web python manage.py makemigrations`
+- **Download timeouts**: subprocess capped at `DOWNLOAD_TIMEOUT=300s` (kills hung yt-dlp); `--socket-timeout 30` guards against network stalls
 - **No lint / format / typecheck config** exists
 - **Logging**: structured JSON via Loguru (`serialize=True`) at `/var/log/gunicorn/`, with stdlib logs intercepted by `InterceptHandler`:
   - `app.log` (INFO+, 30-day retention)
