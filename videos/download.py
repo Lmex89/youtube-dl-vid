@@ -14,9 +14,11 @@ COMMAND_YT_DLP = [
     "-S", "res,ext:mp4:m4a",
     "--merge-output-format", "mp4",
     "--no-cache-dir",
+    "--socket-timeout", "30",
 ]
 
 SLOW_DOWNLOAD_THRESHOLD = 500  # ms
+DOWNLOAD_TIMEOUT = 300  # seconds
 
 
 def build_command(url: str, output_path: Path) -> List[str]:
@@ -44,7 +46,7 @@ def run_download(command: List[str], log_path: Path) -> None:
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "w") as f:
-            retcode = sp.call(command, stdout=f)
+            retcode = sp.call(command, stdout=f, timeout=DOWNLOAD_TIMEOUT)
         
         duration_ms = (time.time() - start_time) * 1000
         
@@ -80,6 +82,20 @@ def run_download(command: List[str], log_path: Path) -> None:
         with open(log_path) as f:
             for line in f:
                 logger.debug(line.rstrip())
+                
+    except sp.TimeoutExpired as exc:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.error(
+            json.dumps({
+                "event": "download_timed_out",
+                "timeout_seconds": DOWNLOAD_TIMEOUT,
+                "duration_ms": round(duration_ms, 2),
+                "log_path": str(log_path),
+            })
+        )
+        raise RuntimeError(
+            f"yt-dlp timed out after {DOWNLOAD_TIMEOUT} seconds"
+        ) from exc
                 
     except Exception as exc:
         duration_ms = (time.time() - start_time) * 1000
