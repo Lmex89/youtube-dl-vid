@@ -11,7 +11,8 @@ resulting files. Containerized with Docker Compose (Django + PostgreSQL).
 - **Real progress** — live yt-dlp download percentage (`0-100`) persisted to DB
   and exposed via a polling endpoint
 - **Any yt-dlp source** — YouTube, Facebook, etc. (requires ffmpeg to merge)
-- **MP4 output** — best quality video+audio ≤720p merged to MP4
+- **Output profiles** — standard MP4, WhatsApp-ready MP4 (H.264/AAC, ≤16 MiB),
+  and M4A/AAC audio extraction
 - **Categorization** — organize downloaded videos into categories
 - **Rate limiting** — per-endpoint limits with JSON `429` responses
 - **Auto-cleanup** — re-downloading a URL removes previous copies
@@ -25,7 +26,7 @@ resulting files. Containerized with Docker Compose (Django + PostgreSQL).
 | Backend | Python 3.12, Django ~4.2, DRF ~3.15 |
 | Database | PostgreSQL (via `psycopg[binary]`) |
 | Download | yt-dlp + ffmpeg |
-| Server | Gunicorn ~22 (3 workers) |
+| Server | Gunicorn ~22 (2 workers × 2 threads) |
 | Deploy | Docker Compose, Alpine image, WhiteNoise |
 | Rate limit | django-ratelimit ~4.1 |
 | Logging | Loguru (JSON), `python-json-logger` |
@@ -62,12 +63,12 @@ endpoint is rate limited by client IP.
 |---|---|---|---|
 | `videos/` | POST | Create a URL record | 5/m |
 | `videos/` | GET | List URL records | 30/m |
-| `videos/<uuid:pk>/` | GET | Status + progress of a URL | 30/m |
+| `videos/<uuid:pk>` | GET | Status + progress of a URL | 30/m |
 | `categorias/` | POST | Create a category | 10/m |
 | `categorias/` | GET | List categories | 30/m |
 | `videos-uploaded/` | POST | **Download a video (async)** | 5/m |
 | `videos-uploaded/` | GET | List completed downloads | 30/m |
-| `videos-uploaded/<uuid:pk>/` | GET | Download the MP4 file | 10/m |
+| `videos-uploaded/<uuid:pk>` | GET | Download the MP4 file | 10/m |
 
 Exceeding a rate limit returns `429` with:
 `{"error": "rate limit exceeded", "detail": ...}`.
@@ -97,14 +98,40 @@ The download starts immediately in a background thread and the request returns
 {
   "id": "52fd264c-eb2a-4f85-a9d9-d3f912aa8988",
   "status": "pending",
-  "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+  "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "output_profile": "standard_video"
 }
+```
+
+### Output profiles
+
+`output_profile` is optional — omitting it (or sending `null`/`""`) preserves
+the original MP4 behavior. Pass it in the POST body to opt into:
+
+| Profile | Output | Details |
+|---|---|---|
+| `standard_video` (default) | `downloads/<id>.mp4` | Best video+audio ≤720p merged to MP4 — unchanged legacy behavior |
+| `whatsapp_video` | `downloads/<id>.mp4` | H.264 Main (no B-frames) + AAC, `yuv420p`, `+faststart`, re-encoded by ffmpeg to fit **16 MiB** (reduces resolution/bitrate if needed) |
+| `audio_m4a` | `downloads/<id>.m4a` | Audio-only AAC/M4A at 128 kbps |
+
+Unknown profiles return `400` with the list of allowed values.
+
+```bash
+# WhatsApp-ready video
+curl -X POST http://localhost:8011/api/v1/yt/videos-uploaded/ \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "output_profile": "whatsapp_video"}'
+
+# Audio (M4A/AAC)
+curl -X POST http://localhost:8011/api/v1/yt/videos-uploaded/ \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "output_profile": "audio_m4a"}'
 ```
 
 ### Poll download status and progress
 
 ```bash
-curl http://localhost:8011/api/v1/yt/videos/52fd264c-eb2a-4f85-a9d9-d3f912aa8988/
+curl http://localhost:8011/api/v1/yt/videos/52fd264c-eb2a-4f85-a9d9-d3f912aa8988
 ```
 
 ```json
@@ -154,7 +181,7 @@ curl http://localhost:8011/api/v1/yt/categorias/
 curl http://localhost:8011/api/v1/yt/videos-uploaded/
 
 # Download a video file
-curl -O -J http://localhost:8011/api/v1/yt/videos-uploaded/<video-uuid>/
+curl -O -J http://localhost:8011/api/v1/yt/videos-uploaded/<video-uuid>
 ```
 
 List response shape:
@@ -164,6 +191,7 @@ List response shape:
   {
     "id": "b87df865-3360-4c36-ac81-c6860bf547d6",
     "video": "/code/downloads/4be03709-cf61-4a57-ba63-b98dbc93f3bc.mp4",
+    "mime_type": "video/mp4",
     "title": "Test",
     "category": null,
     "codecurl": "4be03709-cf61-4a57-ba63-b98dbc93f3bc",
@@ -187,7 +215,7 @@ curl -X POST http://localhost:8011/api/v1/yt/videos-uploaded/ \
 
 # 2. Poll progress until status=1
 while true; do
-  curl -s http://localhost:8011/api/v1/yt/videos/<codecurl-uuid>/
+  curl -s http://localhost:8011/api/v1/yt/videos/<codecurl-uuid>
   echo
   sleep 2
 done
@@ -196,7 +224,7 @@ done
 curl http://localhost:8011/api/v1/yt/videos-uploaded/
 
 # 4. Download the file
-curl -O -J http://localhost:8011/api/v1/yt/videos-uploaded/<video-uuid>/
+curl -O -J http://localhost:8011/api/v1/yt/videos-uploaded/<video-uuid>
 ```
 
 ## Architecture
@@ -221,8 +249,9 @@ youtube-dl-vid/
 ├── Dockerfile                   # Multi-stage Alpine build
 ├── docker-entrypoint.sh         # makemigrations → migrate → collectstatic → gunicorn
 ├── requirements.txt             # Python dependencies
-├── downloads/                   # Downloaded MP4 files (bind mount)
-├── logs/                        # yt-dlp per-download log files
+├── downloads/                   # Downloaded MP4/M4A files (bind mount)
+│   └── .tmp/                    # Per-download working dirs (ffmpeg re-encode)
+├── logs/                        # yt-dlp and ffmpeg per-download logs
 ├── Youtube_dl_vid/              # Project settings, logging, middleware, routing
 │   ├── settings.py              # Django configuration
 │   ├── logging_config.py        # Loguru JSON config
@@ -232,36 +261,49 @@ youtube-dl-vid/
     ├── models.py                # CodecUrls, VideosUploaded, Categorias
     ├── views.py                 # DRF views + rate limiting
     ├── serializers.py
-    ├── download.py              # yt-dlp builder, async runner, progress tracking
+    ├── profiles.py              # Output profiles (formats, ffmpeg commands)
+    ├── process.py               # Subprocess runner + progress parsing
+    ├── media.py                 # ffprobe duration + ffmpeg runner
+    ├── download.py              # Async worker orchestration + cleanup
     └── urls.py
 ```
 
 ### Download process
 
-1. `POST videos-uploaded/` creates a `CodecUrls` record and starts a daemon
-   thread (`start_download_async` in `videos/download.py`).
-2. yt-dlp runs with `--newline`, streaming progress lines that are parsed
-   (`PROGRESS_RE`) and written to `CodecUrls.progress` in the DB in real time.
+1. `POST videos-uploaded/` validates `output_profile`, creates a `CodecUrls`
+   record, and starts a daemon thread (`start_download_async` in
+   `videos/download.py`).
+2. yt-dlp runs with `--newline`, streaming progress lines that are parsed and
+   written to `CodecUrls.progress` in the DB in real time.
 3. The subprocess is capped at `DOWNLOAD_TIMEOUT=300s`; `--socket-timeout 30`
-   guards against network stalls. A hung yt-dlp is killed and the URL is
+   guards against network stalls. A hung process is killed and the URL is
    marked `status=3`.
-4. On success the MP4 is stored in `downloads/<codecurl-uuid>.mp4`, a
-   `VideosUploaded` record is created, and status becomes `1` with
-   `progress=100`.
-5. Old downloads for the same URL are auto-cleaned (`cleanup_old_downloads`).
+4. `whatsapp_video` and `audio_m4a` download into `downloads/.tmp/<id>/` and
+   are re-encoded/moved to the final `downloads/<id>.<ext>` only after success;
+   temp dirs are removed on success and failure.
+5. On success a `VideosUploaded` record is created with `file_path` and
+   `mime_type`, and status becomes `1` with `progress=100`.
+6. Old downloads for the same URL **and profile** are auto-cleaned
+   (`cleanup_old_downloads`), so a WhatsApp copy does not delete the standard
+   or audio copy.
 
 yt-dlp format spec:
 `bestvideo[height<=720]+bestaudio/best[height<=720]/best`, merged to MP4 via
-ffmpeg.
+ffmpeg. The `whatsapp_video` profile then re-encodes with libx264 Main
+(`-bf 0`, `yuv420p`, `+faststart`) and AAC, targeting ≤16 MiB by lowering
+resolution/bitrate when needed.
 
 ## Data models
 
 **CodecUrls** — URL + download lifecycle
-- `id` (UUID), `url`, `status` (1/2/3), `progress` (0-100 float)
+- `id` (UUID), `url`, `output_profile`
+  (`standard_video`/`whatsapp_video`/`audio_m4a`), `status` (1/2/3),
+  `progress` (0-100 float)
 - `created_at`, `updated_at`, `visible`
 
 **VideosUploaded** — completed downloads
-- `id` (UUID), `video_path`, `title`, `category` (FK), `codecurl` (FK)
+- `id` (UUID), `file_path`, `mime_type`, `title`, `category` (FK),
+  `codecurl` (FK)
 - `created_at`, `updated_at`, `visible`
 
 **Categorias** — video categories
@@ -281,13 +323,17 @@ Environment variables (in `docker-compose.yaml`):
 
 Key settings in `Youtube_dl_vid/settings.py`:
 
-- `DOWNLOADS_DIR` — where MP4 files are written
+- `DOWNLOADS_DIR` — where MP4/M4A files are written
+- `DOWNLOAD_LOGS_DIR` — per-download yt-dlp/ffmpeg logs
+- `FFMPEG_BINARY` / `FFPROBE_BINARY` — media tool paths
+- `MEDIA_PROCESS_TIMEOUT` — per-process timeout for ffmpeg (300s)
+- `WHATSAPP_MEDIA_MAX_BYTES` — WhatsApp size cap (16 MiB)
 - `DOWNLOAD_TIMEOUT` / `--socket-timeout` — subprocess and socket timeouts
   (see `videos/download.py`)
 - Gunicorn timeout is `300s` (matches `DOWNLOAD_TIMEOUT`)
 
 Adjust gunicorn workers in `docker-entrypoint.sh`
-(`--workers=3 --threads=1 --worker-connections=500`).
+(`--workers=2 --threads=2 --worker-connections=200`).
 
 ## Logging
 
@@ -308,7 +354,8 @@ docker compose exec web tail -f /var/log/gunicorn/app.log
 docker compose exec web tail -f /var/log/gunicorn/debug.log
 ```
 
-Per-download yt-dlp output is saved to `logs/<codecurl-uuid>.txt`.
+Per-download output is saved to `logs/<codecurl-uuid>.txt` (yt-dlp) and, for
+profiles that re-encode, `logs/<codecurl-uuid>.ffmpeg.txt`.
 
 ## Development
 
@@ -340,7 +387,7 @@ docker compose exec web python manage.py migrate
 
 ### Tests
 
-The test suite is minimal (`videos/tests.py`). Run with:
+Tests live in `videos/tests.py` (plain Django `TestCase`, no pytest). Run with:
 
 ```bash
 docker compose exec web python manage.py test
@@ -361,6 +408,12 @@ Port `8011` or `51432` already in use → change the mapping in
   `status=3`; retry the download.
 - Large videos may exceed 300s — raise `DOWNLOAD_TIMEOUT` in
   `videos/download.py` and the gunicorn `--timeout` in `docker-entrypoint.sh`.
+
+**WhatsApp re-encode fails or exceeds the limit**
+- Check the ffmpeg log: `docker compose exec web cat /code/logs/<codecurl-uuid>.ffmpeg.txt`
+- `whatsapp_video` re-encodes with libx264 Main + AAC and steps resolution down
+  (720p → 480p → 360p) to fit `WHATSAPP_MEDIA_MAX_BYTES`; if 360p still does not
+  fit, the URL is marked `status=3`.
 
 **Database connection errors**
 ```bash

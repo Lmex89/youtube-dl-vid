@@ -9,15 +9,20 @@ docker compose up --build
 ```
 
 - Web at `http://localhost:8011`, PostgreSQL at `localhost:51432`
-- DB host inside container is `db` (not `localhost`)
+- DB host inside container is `db` (not `localhost`); credentials are hardcoded
+  in `Youtube_dl_vid/settings.py` — the `POSTGRES_*` env vars in
+  `docker-compose.yaml` are **not read**
 - `DEBUG=False` always; only gunicorn via `docker-entrypoint.sh` (no `runserver`)
+- Repo is bind-mounted (`.:/code`), so code edits need no rebuild — but gunicorn
+  runs without `--reload`
 
 ## Commands
 
 ```bash
 docker compose exec web python manage.py <command>
-docker compose exec web python manage.py test          # tests (vanilla TestCase, no pytest)
+docker compose exec web python manage.py test          # Django TestCase suite in videos/tests.py (no pytest)
 docker compose exec web tail -f /var/log/gunicorn/<file>  # logs
+docker compose restart web                             # REQUIRED after editing Python code
 ```
 
 ## API (`/api/v1/yt/`)
@@ -34,25 +39,31 @@ docker compose exec web tail -f /var/log/gunicorn/<file>  # logs
 | `videos-uploaded/<uuid:pk>` | GET (download file) | 10/m |
 
 **Download flow (async):** `POST videos-uploaded/` starts a background thread and
-returns `202 {"id": <codecurl_uuid>, "status": "pending", "url": ...}`. Poll
-`GET videos/<uuid:pk>` for status (`2`=downloading, `1`=success, `3`=error) and
-`progress` (real yt-dlp download % 0-100). A `VideosUploaded` record is created
-only after the download succeeds.
+returns `202 {"id": <codecurl_uuid>, "status": "pending", "url": ..., "output_profile": ...}`.
+`output_profile` is optional and defaults to `standard_video` (legacy MP4
+behavior); `whatsapp_video` → MP4 H.264 Main/AAC re-encoded to ≤16 MiB and
+`audio_m4a` → M4A/AAC are opt-in. Invalid values return `400`. Poll `GET videos/<uuid:pk>` for status
+(`2`=downloading, `1`=success, `3`=error) and `progress` (real download % 0-100).
+A `VideosUploaded` record is created only after the download succeeds.
 
 ## Architecture
 
 - **`videos/`** — models, views, serializers, yt-dlp integration
+- **`videos/profiles.py`** — output profiles (`standard_video`, `whatsapp_video`, `audio_m4a`): yt-dlp args, ffmpeg command, extension, MIME type; add profiles here via `BaseDownloadProfile` subclasses + `PROFILES` registry
+- **`videos/process.py`** — generic subprocess streaming runner + progress parsers (yt-dlp `[download] N%`); **`videos/media.py`** — ffprobe duration + ffmpeg runner (parses `out_time_us`)
 - **`Youtube_dl_vid/`** — project settings, logging config, middleware, URL routing
-- **`videos/download.py`** — yt-dlp command builder + subprocess runner + async background thread + progress tracking + cleanup
+- **`videos/download.py`** — async worker orchestration: temp download dir → profile post-process → atomic move → DB record + cleanup
 - **`docker-entrypoint.sh`** — runs `makemigrations` → `migrate` → `collectstatic` → `gunicorn`
-- **`downloads/`** — downloaded MP4 files; old downloads for same URL auto-cleaned
-- Downloads run in a daemon thread (`start_download_async`) that updates `CodecUrls.progress` in DB in real time; the thread is tracked in a module-level registry keyed by codecurl id
+- **`downloads/<codecurl-uuid>.<ext>`** — final files (`mp4`/`m4a`); re-encoded profiles stage under `downloads/.tmp/<codecurl-uuid>/` and are cleaned on success/failure. Old downloads for same URL **and profile** auto-cleaned. Per-download logs: `logs/<codecurl-uuid>.txt` (yt-dlp) and `logs/<codecurl-uuid>.ffmpeg.txt`
+- Downloads run in a daemon thread (`start_download_async`) that updates `CodecUrls.progress` in DB in real time; the thread is tracked in a module-level registry keyed by codecurl id. Restarting the container kills in-flight downloads and leaves `status=2` forever (no retry/resume)
+- `Youtube_dl_vid/settings_bkp.py` is a dead Django 3.2 backup — edit `settings.py` only
 - yt-dlp format: `bestvideo[height<=720]+bestaudio/best[height<=720]/best` merged to MP4 (requires ffmpeg); `--newline` enables per-line progress output parsed by `PROGRESS_RE`
+- `whatsapp_video` re-encodes with libx264 (`-profile:v main -bf 0 -pix_fmt yuv420p +faststart`) + AAC, stepping 720p→480p→360p to fit `WHATSAPP_MEDIA_MAX_BYTES` (16 MiB); `audio_m4a` uses `yt-dlp -x --audio-format m4a --audio-quality 128K`
 
 ## Key facts
 
-- **Rate limiting**: `django-ratelimit~=4.1` with `block=True`, key=`user_or_ip`, LocMemCache, custom 429 view at `videos.views.ratelimited_error`
-- **Migrations auto-applied** on container start; create new ones with `docker compose exec web python manage.py makemigrations`
+- **Rate limiting**: `django-ratelimit~=4.1` with `block=True`, key=`user_or_ip`, custom 429 view at `videos.views.ratelimited_error`. LocMemCache is per-process, so limits are enforced **per gunicorn worker**, not globally
+- **Migrations**: entrypoint runs `makemigrations --no-input` then `migrate` on every start, so missing migrations are auto-generated — still create and commit them with `docker compose exec web python manage.py makemigrations` after model changes
 - **Download timeouts**: subprocess capped at `DOWNLOAD_TIMEOUT=300s` (kills hung yt-dlp); `--socket-timeout 30` guards against network stalls
 - **No lint / format / typecheck config** exists
 - **Logging**: structured JSON via Loguru (`serialize=True`) at `/var/log/gunicorn/`, with stdlib logs intercepted by `InterceptHandler`:
