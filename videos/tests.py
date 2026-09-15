@@ -1,3 +1,363 @@
-from django.test import TestCase
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 
-# Create your tests here.
+from django.core.cache import caches
+from django.test import TestCase, override_settings
+from rest_framework.test import APIClient
+
+from videos.download import _async_download_worker, cleanup_old_downloads
+from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
+from videos.profiles import PROFILES, get_profile
+
+
+class ProfileRegistryTests(TestCase):
+    def test_supported_profiles_are_registered(self):
+        self.assertEqual(
+            sorted(PROFILES.keys()),
+            ["audio_m4a", "standard_video", "whatsapp_video"],
+        )
+
+    def test_invalid_profile_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            get_profile("not_a_profile")
+
+    def test_profile_extensions_and_mime_types(self):
+        self.assertEqual(
+            get_profile(OutputProfile.STANDARD_VIDEO).mime_type, "video/mp4"
+        )
+        self.assertEqual(
+            get_profile(OutputProfile.WHATSAPP_VIDEO).mime_type, "video/mp4"
+        )
+        audio = get_profile(OutputProfile.AUDIO_M4A)
+        self.assertEqual(audio.extension, "m4a")
+        self.assertEqual(audio.mime_type, "audio/mp4")
+
+
+class BuildCommandTests(TestCase):
+    def test_standard_profile_downloads_to_destination(self):
+        destination = Path("/tmp/downloads/video.mp4")
+        command = get_profile(OutputProfile.STANDARD_VIDEO).build_command(
+            "https://example.com/video",
+            destination,
+            Path("/tmp/downloads"),
+        )
+        self.assertIn(str(destination), command)
+        self.assertIn(
+            "bestvideo[height<=720]+bestaudio/best[height<=720]/best", command
+        )
+        self.assertIn("--merge-output-format", command)
+        self.assertIn("--no-cache-dir", command)
+        self.assertIn("--newline", command)
+
+    def test_whatsapp_profile_downloads_to_temporary_source(self):
+        command = get_profile(OutputProfile.WHATSAPP_VIDEO).build_command(
+            "https://example.com/video",
+            Path("/tmp/downloads/video.mp4"),
+            Path("/tmp/downloads/.tmp"),
+        )
+        output_template = command[command.index("-o") + 1]
+        self.assertTrue(output_template.endswith("source.%(ext)s"))
+        self.assertNotIn("/tmp/downloads/video.mp4", command)
+
+    def test_audio_profile_extracts_m4a(self):
+        command = get_profile(OutputProfile.AUDIO_M4A).build_command(
+            "https://example.com/video",
+            Path("/tmp/downloads/audio.m4a"),
+            Path("/tmp/downloads/.tmp"),
+        )
+        self.assertIn("-x", command)
+        self.assertEqual(command[command.index("--audio-format") + 1], "m4a")
+        self.assertEqual(command[command.index("--audio-quality") + 1], "128K")
+        self.assertIn("bestaudio/best", command)
+
+    def test_whatsapp_ffmpeg_command_is_cloud_api_compatible(self):
+        profile = get_profile(OutputProfile.WHATSAPP_VIDEO)
+        command = profile._build_ffmpeg_command(
+            source=Path("/tmp/source.mp4"),
+            destination=Path("/tmp/out.mp4"),
+            duration=60.0,
+            height=720,
+            audio_kbps=128,
+            target_bytes=16 * 1024 * 1024,
+        )
+        self.assertIn("libx264", command)
+        self.assertIn("aac", command)
+        self.assertIn("yuv420p", command)
+        self.assertIn("+faststart", command)
+        self.assertEqual(command[command.index("-bf") + 1], "0")
+        self.assertEqual(command[command.index("-profile:v") + 1], "main")
+        self.assertEqual(command[command.index("-ac") + 1], "2")
+        self.assertEqual(
+            command[-1], str(Path("/tmp/out.mp4"))
+        )
+
+    def test_whatsapp_target_bitrate_respects_size_limit(self):
+        profile = get_profile(OutputProfile.WHATSAPP_VIDEO)
+        target_bytes = 16 * 1024 * 1024
+        video_kbps = profile._target_video_kbps(600.0, 128, target_bytes)
+        total_kbps = target_bytes * 8 / 600.0 / 1000
+        self.assertLess(video_kbps, total_kbps)
+        self.assertGreaterEqual(video_kbps, profile.MIN_VIDEO_KBPS)
+
+    def test_whatsapp_target_bitrate_without_duration(self):
+        profile = get_profile(OutputProfile.WHATSAPP_VIDEO)
+        self.assertIsNone(profile._target_video_kbps(None, 128, 1024))
+
+
+class AsyncWorkerTests(TestCase):
+    def _temp_settings(self, tmp):
+        downloads = Path(tmp) / "downloads"
+        downloads.mkdir()
+        logs = Path(tmp) / "logs"
+        return override_settings(
+            DOWNLOADS_DIR=downloads,
+            DOWNLOAD_LOGS_DIR=logs,
+        )
+
+    def test_standard_worker_marks_success_and_stores_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._temp_settings(tmp):
+                codecurl = CodecUrls.objects.create(url="https://example.com")
+                with patch("videos.download.run_download"), patch(
+                    "videos.download.close_old_connections"
+                ):
+                    _async_download_worker(str(codecurl.id), "req-1")
+
+                codecurl.refresh_from_db()
+                self.assertEqual(codecurl.status, StatusCodec.SUCCESS)
+                self.assertEqual(codecurl.progress, 100.0)
+
+                upload = VideosUploaded.objects.get(codecurl=codecurl)
+                self.assertTrue(upload.file_path.endswith(f"{codecurl.id}.mp4"))
+                self.assertEqual(upload.mime_type, "video/mp4")
+
+    def test_worker_marks_error_when_download_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._temp_settings(tmp):
+                codecurl = CodecUrls.objects.create(url="https://example.com")
+                with patch(
+                    "videos.download.run_download",
+                    side_effect=RuntimeError("boom"),
+                ), patch("videos.download.close_old_connections"):
+                    _async_download_worker(str(codecurl.id), "req-2")
+
+                codecurl.refresh_from_db()
+                self.assertEqual(codecurl.status, StatusCodec.ERROR)
+                self.assertFalse(VideosUploaded.objects.exists())
+
+    def test_whatsapp_worker_runs_transcode_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._temp_settings(tmp):
+                downloads = Path(tmp) / "downloads"
+                codecurl = CodecUrls.objects.create(
+                    url="https://example.com",
+                    output_profile=OutputProfile.WHATSAPP_VIDEO,
+                )
+                workdir = downloads / ".tmp" / str(codecurl.id)
+
+                def fake_download(command, log_path, progress_callback=None, timeout=300):
+                    workdir.mkdir(parents=True, exist_ok=True)
+                    (workdir / "source.mp4").write_bytes(b"source")
+                    if progress_callback:
+                        progress_callback(100.0)
+
+                def fake_ffmpeg(command, log_path, duration=None, progress_callback=None):
+                    Path(command[-1]).write_bytes(b"encoded")
+                    if progress_callback:
+                        progress_callback(100.0)
+
+                with patch(
+                    "videos.download.run_download", side_effect=fake_download
+                ), patch(
+                    "videos.profiles.run_ffmpeg", side_effect=fake_ffmpeg
+                ), patch(
+                    "videos.profiles.probe_duration", return_value=None
+                ), patch(
+                    "videos.download.close_old_connections"
+                ):
+                    _async_download_worker(str(codecurl.id), "req-3")
+
+                codecurl.refresh_from_db()
+                self.assertEqual(codecurl.status, StatusCodec.SUCCESS)
+                destination = downloads / f"{codecurl.id}.mp4"
+                self.assertTrue(destination.exists())
+                self.assertFalse(workdir.exists())
+
+                upload = VideosUploaded.objects.get(codecurl=codecurl)
+                self.assertEqual(upload.mime_type, "video/mp4")
+                self.assertEqual(upload.file_path, str(destination))
+
+
+class VideosUploadedPostTests(TestCase):
+    def setUp(self):
+        caches["ratelimit"].clear()
+        self.client = APIClient()
+        self.url = "/api/v1/yt/videos-uploaded/"
+
+    @patch("videos.views.start_download_async")
+    def test_post_without_url_returns_400(self, mocked_start):
+        response = self.client.post(self.url, {}, format="json")
+        self.assertEqual(response.status_code, 400)
+        mocked_start.assert_not_called()
+
+    @patch("videos.views.start_download_async")
+    def test_post_defaults_to_standard_video(self, mocked_start):
+        response = self.client.post(
+            self.url, {"url": "https://example.com/v"}, format="json"
+        )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["output_profile"], "standard_video")
+        codecurl = CodecUrls.objects.get(id=response.data["id"])
+        self.assertEqual(
+            codecurl.output_profile, OutputProfile.STANDARD_VIDEO
+        )
+        mocked_start.assert_called_once()
+
+    @patch("videos.views.start_download_async")
+    def test_post_accepts_explicit_standard_video(self, mocked_start):
+        response = self.client.post(
+            self.url,
+            {"url": "https://example.com/v", "output_profile": "standard_video"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["output_profile"], "standard_video")
+
+    @patch("videos.views.start_download_async")
+    def test_post_blank_profile_falls_back_to_standard_video(self, mocked_start):
+        response = self.client.post(
+            self.url,
+            {"url": "https://example.com/v", "output_profile": ""},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["output_profile"], "standard_video")
+
+    @patch("videos.views.start_download_async")
+    def test_post_null_profile_falls_back_to_standard_video(self, mocked_start):
+        response = self.client.post(
+            self.url,
+            {"url": "https://example.com/v", "output_profile": None},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["output_profile"], "standard_video")
+
+    @patch("videos.views.start_download_async")
+    def test_post_accepts_whatsapp_profile(self, mocked_start):
+        response = self.client.post(
+            self.url,
+            {"url": "https://example.com/v", "output_profile": "whatsapp_video"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["output_profile"], "whatsapp_video")
+
+    @patch("videos.views.start_download_async")
+    def test_post_accepts_audio_profile(self, mocked_start):
+        response = self.client.post(
+            self.url,
+            {"url": "https://example.com/v", "output_profile": "audio_m4a"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data["output_profile"], "audio_m4a")
+
+    @patch("videos.views.start_download_async")
+    def test_post_rejects_unknown_profile(self, mocked_start):
+        response = self.client.post(
+            self.url,
+            {"url": "https://example.com/v", "output_profile": "hacked"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("allowed", response.data)
+        self.assertFalse(CodecUrls.objects.exists())
+        mocked_start.assert_not_called()
+
+
+class VideosUploadedFileTests(TestCase):
+    def setUp(self):
+        caches["ratelimit"].clear()
+        self.client = APIClient()
+
+    def test_download_uses_profile_mime_and_extension(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            file_path = Path(tmp) / "audio.m4a"
+            file_path.write_bytes(b"audio-bytes")
+            codecurl = CodecUrls.objects.create(
+                url="https://example.com/v",
+                output_profile=OutputProfile.AUDIO_M4A,
+            )
+            upload = VideosUploaded.objects.create(
+                file_path=str(file_path),
+                mime_type="audio/mp4",
+                codecurl=codecurl,
+            )
+
+            response = self.client.get(
+                f"/api/v1/yt/videos-uploaded/{upload.id}"
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response["Content-Type"], "audio/mp4")
+            self.assertIn(f"{upload.id}.m4a", response["Content-Disposition"])
+            b"".join(response.streaming_content)
+
+    def test_download_returns_404_when_file_missing(self):
+        codecurl = CodecUrls.objects.create(url="https://example.com/v")
+        upload = VideosUploaded.objects.create(
+            file_path="/tmp/does-not-exist-anywhere.mp4",
+            mime_type="video/mp4",
+            codecurl=codecurl,
+        )
+        response = self.client.get(f"/api/v1/yt/videos-uploaded/{upload.id}")
+        self.assertEqual(response.status_code, 404)
+
+    def test_serializer_exposes_file_metadata(self):
+        codecurl = CodecUrls.objects.create(url="https://example.com/v")
+        VideosUploaded.objects.create(
+            file_path="/tmp/video.mp4",
+            mime_type="video/mp4",
+            codecurl=codecurl,
+        )
+        response = self.client.get("/api/v1/yt/videos-uploaded/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data[0]["video"], "/tmp/video.mp4")
+        self.assertEqual(response.data[0]["mime_type"], "video/mp4")
+
+
+class CleanupTests(TestCase):
+    def test_cleanup_is_scoped_by_output_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with override_settings(DOWNLOADS_DIR=Path(tmp)):
+                old_standard = CodecUrls.objects.create(
+                    url="https://example.com/same",
+                    output_profile=OutputProfile.STANDARD_VIDEO,
+                )
+                old_audio = CodecUrls.objects.create(
+                    url="https://example.com/same",
+                    output_profile=OutputProfile.AUDIO_M4A,
+                )
+                current = CodecUrls.objects.create(
+                    url="https://example.com/same",
+                    output_profile=OutputProfile.STANDARD_VIDEO,
+                )
+                standard_upload = VideosUploaded.objects.create(
+                    file_path="",
+                    codecurl=old_standard,
+                )
+                audio_upload = VideosUploaded.objects.create(
+                    file_path="",
+                    codecurl=old_audio,
+                )
+
+                cleanup_old_downloads(current)
+
+                self.assertFalse(
+                    VideosUploaded.objects.filter(pk=standard_upload.pk).exists()
+                )
+                self.assertTrue(
+                    VideosUploaded.objects.filter(pk=audio_upload.pk).exists()
+                )
