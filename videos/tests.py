@@ -1,14 +1,16 @@
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 from django.core.cache import caches
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 from rest_framework.test import APIClient
 
-from videos.download import _async_download_worker, cleanup_old_downloads
+from videos.download import _async_download_worker, cleanup_old_downloads, is_download_running
 from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
 from videos.profiles import PROFILES, get_profile
+from videos.runner import FakeCommandRunner, set_test_runner
 
 
 class ProfileRegistryTests(TestCase):
@@ -156,13 +158,13 @@ class AsyncWorkerTests(TestCase):
                 )
                 workdir = downloads / ".tmp" / str(codecurl.id)
 
-                def fake_download(command, log_path, progress_callback=None, timeout=300):
+                def fake_download(command, log_path, progress_callback=None, timeout=300, runner=None):
                     workdir.mkdir(parents=True, exist_ok=True)
                     (workdir / "source.mp4").write_bytes(b"source")
                     if progress_callback:
                         progress_callback(100.0)
 
-                def fake_ffmpeg(command, log_path, duration=None, progress_callback=None):
+                def fake_ffmpeg(command, log_path, duration=None, progress_callback=None, runner=None):
                     Path(command[-1]).write_bytes(b"encoded")
                     if progress_callback:
                         progress_callback(100.0)
@@ -361,3 +363,88 @@ class CleanupTests(TestCase):
                 self.assertTrue(
                     VideosUploaded.objects.filter(pk=audio_upload.pk).exists()
                 )
+
+
+def _wait_for_download(codecurl_id: str, timeout: float = 5.0) -> None:
+    """Poll until the background download thread finishes."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not is_download_running(codecurl_id):
+            return
+        time.sleep(0.02)
+    raise TimeoutError(f"download {codecurl_id} did not finish in {timeout}s")
+
+
+class StandardVideoEndToEndTests(TransactionTestCase):
+    """End-to-end HTTP test: POST → background job → GET status.
+
+    Uses FakeCommandRunner so no real yt-dlp / ffmpeg runs.  The real
+    thread path executes against a real test DB and temp downloads dir.
+    """
+
+    def setUp(self):
+        caches["ratelimit"].clear()
+        self.client = APIClient()
+        self._tmp = tempfile.TemporaryDirectory()
+        self._downloads = Path(self._tmp.name) / "downloads"
+        self._downloads.mkdir()
+        self._logs = Path(self._tmp.name) / "logs"
+        self._logs.mkdir()
+        self._settings = override_settings(
+            DOWNLOADS_DIR=self._downloads,
+            DOWNLOAD_LOGS_DIR=self._logs,
+        )
+        self._settings.enable()
+
+    def tearDown(self):
+        self._settings.disable()
+        self._tmp.cleanup()
+        set_test_runner(None)
+
+    def test_standard_video_success_end_to_end(self):
+        runner = FakeCommandRunner(scripts=[{"progress": [50.0, 100.0]}])
+        set_test_runner(runner)
+
+        post = self.client.post(
+            "/api/v1/yt/videos-uploaded/",
+            {"url": "https://example.com/video"},
+            format="json",
+        )
+        self.assertEqual(post.status_code, 202)
+        codecurl_id = post.data["id"]
+        self.assertEqual(post.data["status"], "pending")
+        self.assertEqual(post.data["output_profile"], "standard_video")
+
+        _wait_for_download(codecurl_id)
+
+        get = self.client.get(f"/api/v1/yt/videos/{codecurl_id}")
+        self.assertEqual(get.status_code, 200)
+        self.assertEqual(get.data["status"], StatusCodec.SUCCESS)
+        self.assertEqual(get.data["progress"], 100.0)
+
+        upload = VideosUploaded.objects.get(codecurl_id=codecurl_id)
+        self.assertTrue(upload.file_path.endswith(f"{codecurl_id}.mp4"))
+        self.assertEqual(upload.mime_type, "video/mp4")
+        self.assertTrue(Path(upload.file_path).exists())
+
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(runner.calls[0]["label"], "yt_dlp")
+
+    def test_standard_video_failure_end_to_end(self):
+        runner = FakeCommandRunner(scripts=[{"fail": True, "error": "boom"}])
+        set_test_runner(runner)
+
+        post = self.client.post(
+            "/api/v1/yt/videos-uploaded/",
+            {"url": "https://example.com/video"},
+            format="json",
+        )
+        self.assertEqual(post.status_code, 202)
+        codecurl_id = post.data["id"]
+
+        _wait_for_download(codecurl_id)
+
+        get = self.client.get(f"/api/v1/yt/videos/{codecurl_id}")
+        self.assertEqual(get.status_code, 200)
+        self.assertEqual(get.data["status"], StatusCodec.ERROR)
+        self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
