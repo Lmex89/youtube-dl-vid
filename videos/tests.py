@@ -462,6 +462,44 @@ class StandardVideoEndToEndTests(DownloadJobTestCase):
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
 
 
+class ProgressSaverTests(TestCase):
+    def _saver(self):
+        from videos.download import ProgressSaver
+
+        codecurl = CodecUrls.objects.create(url="https://example.com")
+        return codecurl, ProgressSaver(str(codecurl.id))
+
+    def test_clamps_out_of_range(self):
+        codecurl, save = self._saver()
+        save(150.0)
+        codecurl.refresh_from_db()
+        self.assertEqual(codecurl.progress, 100.0)
+        save(-5.0)
+        codecurl.refresh_from_db()
+        self.assertEqual(codecurl.progress, 100.0)
+
+    def test_never_decreases(self):
+        codecurl, save = self._saver()
+        save(60.0)
+        save(20.0)
+        codecurl.refresh_from_db()
+        self.assertEqual(codecurl.progress, 60.0)
+
+    def test_noisy_stream_is_throttled(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        codecurl, save = self._saver()
+        stream = [i / 10 for i in range(1001)]  # 0.0 .. 100.0 in 0.1 steps
+        with CaptureQueriesContext(connection) as ctx:
+            for pct in stream:
+                save(pct)
+        writes = [q for q in ctx.captured_queries if q["sql"].startswith("UPDATE")]
+        self.assertLessEqual(len(writes), 101)
+        codecurl.refresh_from_db()
+        self.assertEqual(codecurl.progress, 100.0)
+
+
 class ConcurrentStartTests(DownloadJobTestCase):
     def test_concurrent_starts_run_exactly_one_job(self):
         release = threading.Event()
