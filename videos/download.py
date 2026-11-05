@@ -44,26 +44,17 @@ def run_download(
 
 
 def is_download_running(codecurl_id: str) -> bool:
-    thread = _download_threads.get(codecurl_id)
-    return bool(thread and thread.is_alive())
+    with _threads_lock:
+        return codecurl_id in _download_threads
 
 
-def start_download_async(codecurl: CodecUrls, request_id: str = "unknown") -> None:
+def start_download_async(codecurl: CodecUrls, request_id: str = "unknown") -> CodecUrls:
+    """Start the job for *codecurl* unless one is already registered.
+
+    The check and registration are one atomic step; a duplicate start is a
+    no-op that returns the same Solicitud de descarga.
+    """
     codecurl_id = str(codecurl.id)
-    if is_download_running(codecurl_id):
-        logger.warning(
-            json.dumps({
-                "event": "download_already_running",
-                "codecurl_id": codecurl_id,
-                "request_id": request_id,
-            })
-        )
-        return
-
-    codecurl.status = StatusCodec.PENDING
-    codecurl.progress = 0.0
-    codecurl.save(update_fields=["status", "progress", "updated_at"])
-
     thread = threading.Thread(
         target=_async_download_worker,
         args=(codecurl_id, request_id),
@@ -71,8 +62,29 @@ def start_download_async(codecurl: CodecUrls, request_id: str = "unknown") -> No
         daemon=True,
     )
     with _threads_lock:
-        _download_threads[codecurl_id] = thread
-    thread.start()
+        duplicate = codecurl_id in _download_threads
+        if not duplicate:
+            _download_threads[codecurl_id] = thread
+    if duplicate:
+        logger.warning(
+            json.dumps({
+                "event": "download_already_running",
+                "codecurl_id": codecurl_id,
+                "request_id": request_id,
+            })
+        )
+        return codecurl
+
+    try:
+        codecurl.status = StatusCodec.PENDING
+        codecurl.progress = 0.0
+        codecurl.save(update_fields=["status", "progress", "updated_at"])
+        thread.start()
+    except Exception:
+        with _threads_lock:
+            _download_threads.pop(codecurl_id, None)
+        raise
+    return codecurl
 
 
 def _async_download_worker(codecurl_id: str, request_id: str) -> None:

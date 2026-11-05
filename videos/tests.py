@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -7,7 +8,12 @@ from django.core.cache import caches
 from django.test import TestCase, TransactionTestCase, override_settings
 from rest_framework.test import APIClient
 
-from videos.download import _async_download_worker, cleanup_old_downloads, is_download_running
+from videos.download import (
+    _async_download_worker,
+    cleanup_old_downloads,
+    is_download_running,
+    start_download_async,
+)
 from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
 from videos.profiles import PROFILES, get_profile
 from videos.runner import FakeCommandRunner, set_test_runner
@@ -451,3 +457,34 @@ class StandardVideoEndToEndTests(TransactionTestCase):
         self.assertEqual(get.status_code, 200)
         self.assertEqual(get.data["status"], StatusCodec.ERROR)
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
+
+    def test_concurrent_starts_run_exactly_one_job(self):
+        release = threading.Event()
+
+        class BlockingRunner(FakeCommandRunner):
+            def run(self, *args, **kwargs):
+                release.wait(5)
+                return super().run(*args, **kwargs)
+
+        runner = BlockingRunner(scripts=[{"progress": [100.0]}])
+        set_test_runner(runner)
+        codecurl = CodecUrls.objects.create(url="https://example.com/video")
+
+        results = []
+        barrier = threading.Barrier(8)
+
+        def start():
+            barrier.wait()
+            results.append(start_download_async(codecurl))
+
+        threads = [threading.Thread(target=start) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        release.set()
+        _wait_for_download(str(codecurl.id))
+
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(len(results), 8)
+        self.assertTrue(all(r.id == codecurl.id for r in results))
