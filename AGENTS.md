@@ -51,14 +51,12 @@ A `VideosUploaded` record is created only after the download succeeds.
 - **`videos/`** — models, views, serializers, yt-dlp integration
 - **`videos/profiles.py`** — output profiles (`standard_video`, `whatsapp_video`, `audio_m4a`): yt-dlp args, ffmpeg command, extension, MIME type; add profiles here via `BaseDownloadProfile` subclasses + `PROFILES` registry
 - **`videos/process.py`** — generic subprocess streaming runner + progress parsers (yt-dlp `[download] N%`); **`videos/media.py`** — ffprobe duration + ffmpeg runner (parses `out_time_us`)
-- **`Youtube_dl_vid/`** — project settings, logging config, middleware, URL routing
 - **`videos/download.py`** — async worker orchestration: temp download dir → profile post-process → atomic move → DB record + cleanup
+- **`Youtube_dl_vid/`** — project settings, logging config, middleware, URL routing
 - **`docker-entrypoint.sh`** — runs `makemigrations` → `migrate` → `collectstatic` → `gunicorn`
 - **`downloads/<codecurl-uuid>.<ext>`** — final files (`mp4`/`m4a`); re-encoded profiles stage under `downloads/.tmp/<codecurl-uuid>/` and are cleaned on success/failure. Old downloads for same URL **and profile** auto-cleaned. Per-download logs: `logs/<codecurl-uuid>.txt` (yt-dlp) and `logs/<codecurl-uuid>.ffmpeg.txt`
 - Downloads run in a daemon thread (`start_download_async`) that updates `CodecUrls.progress` in DB in real time; the thread is tracked in a module-level registry keyed by codecurl id. Restarting the container kills in-flight downloads and leaves `status=2` forever (no retry/resume)
 - `Youtube_dl_vid/settings_bkp.py` is a dead Django 3.2 backup — edit `settings.py` only
-- yt-dlp format: `bestvideo[height<=720]+bestaudio/best[height<=720]/best` merged to MP4 (requires ffmpeg); `--newline` enables per-line progress output parsed by `PROGRESS_RE`
-- `whatsapp_video` re-encodes with libx264 (`-profile:v main -bf 0 -pix_fmt yuv420p +faststart`) + AAC, stepping 720p→480p→360p to fit `WHATSAPP_MEDIA_MAX_BYTES` (16 MiB); `audio_m4a` uses `yt-dlp -x --audio-format m4a --audio-quality 128K`
 
 ## Key facts
 
@@ -108,17 +106,34 @@ Follow Conventional Commits format:
 
 All backend code must follow SOLID:
 
-1. **SRP** — One class/view/serializer = one responsibility. Split `videos/views.py` logic where appropriate.
-2. **OCP** — Extend via subclassing or composition, not by modifying existing classes. DRF generic views and model serializers already favor this.
-3. **LSP** — Subtypes must be substitutable for their base types. Don't override base behavior in ways that break callers.
-4. **ISP** — Keep interfaces narrow. Views should not depend on methods they don't use. Split large serializers.
-5. **DIP** — Depend on abstractions, not concretions. Use DRF's abstract views, pass dependencies via constructor/settings (e.g., `settings.DOWNLOADS_DIR`).
+1. **SRP** — One class/view/serializer = one responsibility.
+2. **OCP** — Extend via subclassing or composition, not by modifying existing classes.
+3. **LSP** — Subtypes must be substitutable for their base types.
+4. **ISP** — Keep interfaces narrow.
+5. **DIP** — Depend on abstractions, not concretions. Use DRF's abstract views; pass dependencies via settings (e.g., `settings.DOWNLOADS_DIR`).
 
 ## Codegraph (mandatory)
 
 Always use Codegraph tools for codebase exploration, symbol navigation, and impact analysis. Prefer Codegraph over built-in tools (Grep, Glob, Read, explore agent) for any codebase query; fall back to built-in tools only when the Codegraph query does not satisfy the request.
 
-1. **Context & symbol discovery** — Use `codegraph_context_for_task` and `codegraph_find_symbol` / `codegraph_search_symbols` to locate relevant code and symbols before making modifications.
-2. **Impact radius & callers** — Check `codegraph_get_impact_radius`, `codegraph_find_callers`, and `codegraph_find_callees` prior to refactoring, renaming, or deleting functions, classes, or models.
-3. **Dependency tracing** — Use `codegraph_trace_dependencies` and `codegraph_architecture_overview` to understand call chains and project structure.
-4. **Graph synchronization** — Run `codegraph_index_repo` or `codegraph_update_graph` when adding or restructuring files to keep the graph index up to date.
+1. **Context & symbol discovery** — Use `codegraph_explore` with a natural-language question or symbol/file names to get verbatim source grouped by file, plus call paths and blast radius.
+2. **Impact analysis** — Use `codegraph_impact` before refactoring, renaming, or deleting to see what depends on a symbol.
+3. **Callee tracing** — Use `codegraph_callees` to see what a function calls.
+4. **Graph health** — Use `codegraph_status` to check index freshness.
+
+## Available skills
+
+38 skills from `mattpocock/skills` are installed in `.agents/skills/` and `.claude/skills/`. Most relevant to this Django project:
+
+- **`code-review`** — Two-axis review (Standards + Spec) of changes since a commit/branch
+- **`tdd`** — Test-driven development with red-green-refactor loop
+- **`diagnosing-bugs`** — Debugging loop for hard bugs and performance regressions
+- **`research`** — Investigate questions against primary sources and capture findings
+- **`pr`** — Write PR descriptions
+- **`wizard`** — Generate interactive bash wizards for manual provisioning steps
+
+TypeScript-focused skills (not directly relevant here): `setup-ts-deep-modules`, `migrate-to-shoehorn`, `scaffold-exercises`, `writing-fragments`, `writing-beats`, `writing-shape`.
+
+General workflow skills: `grilling`, `grill-me`, `grill-with-docs`, `handoff`, `claude-handoff`, `implement`, `implement-spec`, `prototype`, `to-spec`, `to-tickets`, `to-questionnaire`, `triage`, `retro`, `teach`, `wait-what`, `wayfinder`, `ask-matt`, `chief-of-staff`, `loop-me`, `setup-pre-commit`, `setup-matt-pocock-skills`, `git-guardrails-claude-code`, `improve-codebase-architecture`, `domain-modeling`, `codebase-design`, `writing-for-agents`.
+
+Full skill definitions in `skills-lock.json` and individual `SKILL.md` files.
