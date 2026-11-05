@@ -6,6 +6,7 @@ from typing import Callable, List, Optional
 
 from django.conf import settings
 from django.db import close_old_connections
+from django.utils import timezone
 from loguru import logger
 
 from videos.models import CodecUrls, StatusCodec, VideosUploaded
@@ -18,6 +19,24 @@ TMP_DIR_NAME = ".tmp"
 
 _download_threads: dict = {}
 _threads_lock = threading.Lock()
+
+
+class ProgressSaver:
+    """Clamp to 0-100, never go backwards, and write only on >= min_step gains."""
+
+    def __init__(self, codecurl_id: str, min_step: float = 1.0):
+        self.codecurl_id = codecurl_id
+        self.min_step = min_step
+        self.last = 0.0  # start_download_async resets stored progress to 0
+
+    def __call__(self, percent: float) -> None:
+        value = max(0.0, min(100.0, percent))
+        if value < self.last + self.min_step and not (value == 100.0 > self.last):
+            return
+        self.last = value
+        CodecUrls.objects.filter(pk=self.codecurl_id).update(
+            progress=value, updated_at=timezone.now()
+        )
 
 
 def run_download(
@@ -86,12 +105,7 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
     workdir: Optional[Path] = None
     runner = get_command_runner()
 
-    def save_progress(percent: float) -> None:
-        value = max(0.0, min(100.0, percent))
-        codecurl = CodecUrls.objects.filter(pk=codecurl_id).first()
-        if codecurl:
-            codecurl.progress = value
-            codecurl.save(update_fields=["progress", "updated_at"])
+    save_progress = ProgressSaver(codecurl_id)
 
     try:
         codecurl = CodecUrls.objects.get(pk=codecurl_id)
