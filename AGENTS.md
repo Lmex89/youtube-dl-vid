@@ -102,6 +102,10 @@ Follow Conventional Commits format:
 - Use `git commit -s` (Signed-off-by) for attribution
 - One logical change per commit — no mixed concerns
 
+## PR workflow (mandatory)
+
+When using the `implement`, `implement-spec` or `tdd` skills, **always open a PR** after the commits are done. Do not stop at local commits — the deliverable is a pull request.
+
 ## SOLID principles (mandatory)
 
 All backend code must follow SOLID:
