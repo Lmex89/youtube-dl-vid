@@ -14,11 +14,25 @@ from videos.process import parse_yt_dlp_progress, run_process
 from videos.profiles import get_profile
 from videos.runner import CommandRunner, get_command_runner
 
-DOWNLOAD_TIMEOUT = 300  # seconds
 TMP_DIR_NAME = ".tmp"
+
+URL_PREVIEW_LEN = 50
 
 _download_threads: dict = {}
 _threads_lock = threading.Lock()
+
+
+def _preview(url: str) -> str:
+    return url[:URL_PREVIEW_LEN] + ("..." if len(url) > URL_PREVIEW_LEN else "")
+
+
+def stale_pending_jobs():
+    """Pendiente jobs with no live thread, e.g. orphaned by a restart."""
+    with _threads_lock:
+        running = list(_download_threads)
+    return CodecUrls.objects.filter(status=StatusCodec.PENDING).exclude(
+        pk__in=running
+    )
 
 
 class ProgressSaver:
@@ -43,7 +57,6 @@ def run_download(
     command: List[str],
     log_path: Path,
     progress_callback: Optional[Callable[[float], None]] = None,
-    timeout: int = DOWNLOAD_TIMEOUT,
     runner: Optional[CommandRunner] = None,
 ) -> None:
     if runner is None:
@@ -52,7 +65,7 @@ def run_download(
         command,
         log_path,
         label="yt_dlp",
-        timeout=timeout,
+        timeout=settings.MEDIA_PROCESS_TIMEOUT,
         progress_callback=progress_callback,
         progress_parser=parse_yt_dlp_progress,
     )
@@ -137,6 +150,7 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
                 "event": "download_pipeline_started",
                 "codecurl_id": codecurl_id,
                 "output_profile": profile.name,
+                "url_preview": _preview(codecurl.url),
                 "request_id": request_id,
             })
         )
@@ -232,11 +246,7 @@ def cleanup_old_downloads(current_codecurl: CodecUrls) -> None:
         logger.info(
             json.dumps({
                 "event": "cleaning_up_old_downloads",
-                "url_preview": (
-                    current_codecurl.url[:50] + "..."
-                    if len(current_codecurl.url) > 50
-                    else current_codecurl.url
-                ),
+                "url_preview": _preview(current_codecurl.url),
                 "output_profile": current_codecurl.output_profile,
                 "old_urls_count": old_count,
             })
