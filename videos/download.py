@@ -62,28 +62,22 @@ def start_download_async(codecurl: CodecUrls, request_id: str = "unknown") -> Co
         daemon=True,
     )
     with _threads_lock:
-        duplicate = codecurl_id in _download_threads
-        if not duplicate:
-            _download_threads[codecurl_id] = thread
-    if duplicate:
-        logger.warning(
-            json.dumps({
-                "event": "download_already_running",
-                "codecurl_id": codecurl_id,
-                "request_id": request_id,
-            })
-        )
-        return codecurl
-
-    try:
+        if codecurl_id in _download_threads:
+            logger.warning(
+                json.dumps({
+                    "event": "download_already_running",
+                    "codecurl_id": codecurl_id,
+                    "request_id": request_id,
+                })
+            )
+            return codecurl
+        # Register last so a failed save/start never leaves a stale entry;
+        # the worker's cleanup waits on this lock, so it can't pop early.
         codecurl.status = StatusCodec.PENDING
         codecurl.progress = 0.0
         codecurl.save(update_fields=["status", "progress", "updated_at"])
         thread.start()
-    except Exception:
-        with _threads_lock:
-            _download_threads.pop(codecurl_id, None)
-        raise
+        _download_threads[codecurl_id] = thread
     return codecurl
 
 

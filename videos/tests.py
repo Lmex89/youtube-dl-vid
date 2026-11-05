@@ -381,12 +381,8 @@ def _wait_for_download(codecurl_id: str, timeout: float = 5.0) -> None:
     raise TimeoutError(f"download {codecurl_id} did not finish in {timeout}s")
 
 
-class StandardVideoEndToEndTests(TransactionTestCase):
-    """End-to-end HTTP test: POST → background job → GET status.
-
-    Uses FakeCommandRunner so no real yt-dlp / ffmpeg runs.  The real
-    thread path executes against a real test DB and temp downloads dir.
-    """
+class DownloadJobTestCase(TransactionTestCase):
+    """Real thread path against a real test DB and temp downloads dir."""
 
     def setUp(self):
         caches["ratelimit"].clear()
@@ -406,6 +402,13 @@ class StandardVideoEndToEndTests(TransactionTestCase):
         self._settings.disable()
         self._tmp.cleanup()
         set_test_runner(None)
+
+
+class StandardVideoEndToEndTests(DownloadJobTestCase):
+    """End-to-end HTTP test: POST → background job → GET status.
+
+    Uses FakeCommandRunner so no real yt-dlp / ffmpeg runs.
+    """
 
     def test_standard_video_success_end_to_end(self):
         runner = FakeCommandRunner(
@@ -458,6 +461,8 @@ class StandardVideoEndToEndTests(TransactionTestCase):
         self.assertEqual(get.data["status"], StatusCodec.ERROR)
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
 
+
+class ConcurrentStartTests(DownloadJobTestCase):
     def test_concurrent_starts_run_exactly_one_job(self):
         release = threading.Event()
 
