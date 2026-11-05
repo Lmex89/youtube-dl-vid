@@ -65,6 +65,7 @@ class FakeCommandRunner(CommandRunner):
     * ``output_content`` — bytes written to *output_file* (default ``b"fake"``)
     * ``fail`` — if truthy, raise ``RuntimeError`` after creating the file
     * ``error`` — error message when *fail* is truthy
+    * ``timeout`` — if truthy, raise ``TimeoutError`` after creating the file
     * ``log`` — text written to *log_path*
     * ``title`` — media title written to the ``--print-to-file`` path, if present
     """
@@ -111,6 +112,9 @@ class FakeCommandRunner(CommandRunner):
         for pct in script.get("progress", []):
             if progress_callback:
                 progress_callback(pct)
+
+        if script.get("timeout"):
+            raise TimeoutError(script.get("error", "fake timeout"))
 
         if script.get("fail"):
             raise RuntimeError(script.get("error", "fake failure"))
