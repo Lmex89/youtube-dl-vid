@@ -137,3 +137,17 @@ TypeScript-focused skills (not directly relevant here): `setup-ts-deep-modules`,
 General workflow skills: `grilling`, `grill-me`, `grill-with-docs`, `handoff`, `claude-handoff`, `implement`, `implement-spec`, `prototype`, `to-spec`, `to-tickets`, `to-questionnaire`, `triage`, `retro`, `teach`, `wait-what`, `wayfinder`, `ask-matt`, `chief-of-staff`, `loop-me`, `setup-pre-commit`, `setup-matt-pocock-skills`, `git-guardrails-claude-code`, `improve-codebase-architecture`, `domain-modeling`, `codebase-design`, `writing-for-agents`.
 
 Full skill definitions in `skills-lock.json` and individual `SKILL.md` files.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in the repo's GitHub Issues (`Lmex89/youtube-dl-vid`), accessed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: `GLOSSARY.md` + `docs/adr/` at repo root. See `docs/agents/domain.md`.
