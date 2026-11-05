@@ -93,7 +93,7 @@ class FakeCommandRunner(CommandRunner):
         progress_parser: Optional[ProgressParser] = None,
         slow_threshold_ms: int = SLOW_PROCESS_THRESHOLD_MS,
     ) -> int:
-        self.calls.append({"command": command, "label": label})
+        self.calls.append({"command": command, "label": label, "timeout": timeout})
         script = self._scripts.pop(0) if self._scripts else {}
 
         log_path.parent.mkdir(parents=True, exist_ok=True)
