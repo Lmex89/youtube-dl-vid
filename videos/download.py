@@ -102,6 +102,9 @@ def start_download_async(codecurl: CodecUrls, request_id: str = "unknown") -> Co
 
 def _async_download_worker(codecurl_id: str, request_id: str) -> None:
     close_old_connections()
+    downloads_dir = Path(settings.DOWNLOADS_DIR)
+    staging_root = downloads_dir / TMP_DIR_NAME
+    staging_dir = staging_root / codecurl_id
     workdir: Optional[Path] = None
     runner = get_command_runner()
 
@@ -111,12 +114,11 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
         codecurl = CodecUrls.objects.get(pk=codecurl_id)
         profile = get_profile(codecurl.output_profile)
 
-        downloads_dir = Path(settings.DOWNLOADS_DIR)
         destination = downloads_dir / f"{codecurl.id}.{profile.extension}"
         log_path = Path(settings.DOWNLOAD_LOGS_DIR) / f"{codecurl.id}.txt"
 
         if profile.uses_temporary_files:
-            workdir = downloads_dir / TMP_DIR_NAME / codecurl_id
+            workdir = staging_dir
             workdir.mkdir(parents=True, exist_ok=True)
         else:
             workdir = downloads_dir
@@ -206,10 +208,16 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
             codecurl.status = StatusCodec.ERROR
             codecurl.save(update_fields=["status", "updated_at"])
     finally:
+        if (
+            codecurl_id not in {".", ".."}
+            and Path(codecurl_id).name == codecurl_id
+            and staging_dir.parent == staging_root
+            and not staging_root.is_symlink()
+            and not staging_dir.is_symlink()
+        ):
+            shutil.rmtree(staging_dir, ignore_errors=True)
         with _threads_lock:
             _download_threads.pop(codecurl_id, None)
-        if workdir is not None and workdir != Path(settings.DOWNLOADS_DIR):
-            shutil.rmtree(workdir, ignore_errors=True)
         close_old_connections()
 
 
