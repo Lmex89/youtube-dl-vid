@@ -11,6 +11,7 @@ from loguru import logger
 from videos.models import CodecUrls, StatusCodec, VideosUploaded
 from videos.process import parse_yt_dlp_progress, run_process
 from videos.profiles import get_profile
+from videos.runner import CommandRunner, get_command_runner
 
 DOWNLOAD_TIMEOUT = 300  # seconds
 TMP_DIR_NAME = ".tmp"
@@ -24,8 +25,11 @@ def run_download(
     log_path: Path,
     progress_callback: Optional[Callable[[float], None]] = None,
     timeout: int = DOWNLOAD_TIMEOUT,
+    runner: Optional[CommandRunner] = None,
 ) -> None:
-    run_process(
+    if runner is None:
+        raise ValueError("run_download requires a CommandRunner")
+    runner.run(
         command,
         log_path,
         label="yt_dlp",
@@ -74,6 +78,7 @@ def start_download_async(codecurl: CodecUrls, request_id: str = "unknown") -> No
 def _async_download_worker(codecurl_id: str, request_id: str) -> None:
     close_old_connections()
     workdir: Optional[Path] = None
+    runner = get_command_runner()
 
     def save_progress(percent: float) -> None:
         value = max(0.0, min(100.0, percent))
@@ -119,6 +124,7 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
             command,
             log_path,
             progress_callback=on_download_progress,
+            runner=runner,
         )
 
         source = profile.locate_source(workdir, destination)
@@ -132,6 +138,7 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
                 destination,
                 process_log,
                 on_process_progress,
+                runner=runner,
             )
 
         codecurl = CodecUrls.objects.get(pk=codecurl_id)

@@ -8,6 +8,7 @@ from loguru import logger
 
 from videos.media import probe_duration, run_ffmpeg
 from videos.models import OutputProfile
+from videos.runner import CommandRunner
 
 SOURCE_TEMPLATE = "source.%(ext)s"
 
@@ -41,6 +42,7 @@ class BaseDownloadProfile:
         destination: Path,
         log_path: Path,
         on_progress: Optional[ProgressCallback],
+        runner: Optional[CommandRunner] = None,
     ) -> None:
         shutil.move(str(source), str(destination))
 
@@ -103,7 +105,10 @@ class WhatsappVideoProfile(TemporaryOutputProfile):
         destination: Path,
         log_path: Path,
         on_progress: Optional[ProgressCallback],
+        runner: Optional[CommandRunner] = None,
     ) -> None:
+        if runner is None:
+            raise ValueError("WhatsappVideoProfile.post_process requires a CommandRunner")
         max_bytes = settings.WHATSAPP_MEDIA_MAX_BYTES
         duration = probe_duration(source)
 
@@ -116,6 +121,7 @@ class WhatsappVideoProfile(TemporaryOutputProfile):
                 log_path,
                 duration=duration,
                 progress_callback=on_progress,
+                runner=runner,
             )
             size = destination.stat().st_size
             logger.info(
@@ -217,6 +223,7 @@ class AudioM4aProfile(TemporaryOutputProfile):
         destination: Path,
         log_path: Path,
         on_progress: Optional[ProgressCallback],
+        runner: Optional[CommandRunner] = None,
     ) -> None:
         shutil.move(str(source), str(destination))
         if on_progress:

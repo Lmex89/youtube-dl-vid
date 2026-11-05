@@ -8,6 +8,7 @@ from django.conf import settings
 from loguru import logger
 
 from videos.process import ProgressCallback, ProgressParser, run_process
+from videos.runner import CommandRunner
 
 FFPROBE_TIMEOUT = 30  # seconds
 FFMPEG_TIME_RE = re.compile(r"out_time_us=(\d+)")
@@ -63,12 +64,15 @@ def run_ffmpeg(
     log_path: Path,
     duration: Optional[float] = None,
     progress_callback: Optional[ProgressCallback] = None,
+    runner: Optional[CommandRunner] = None,
 ) -> None:
+    if runner is None:
+        raise ValueError("run_ffmpeg requires a CommandRunner")
     progress_parser = None
     if duration and progress_callback:
         progress_parser = build_progress_parser(duration)
 
-    run_process(
+    runner.run(
         command,
         log_path,
         label="ffmpeg",
