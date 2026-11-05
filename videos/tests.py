@@ -402,7 +402,9 @@ class StandardVideoEndToEndTests(TransactionTestCase):
         set_test_runner(None)
 
     def test_standard_video_success_end_to_end(self):
-        runner = FakeCommandRunner(scripts=[{"progress": [50.0, 100.0]}])
+        runner = FakeCommandRunner(
+            scripts=[{"progress": [50.0, 100.0], "title": "Real Title"}]
+        )
         set_test_runner(runner)
 
         post = self.client.post(
@@ -425,6 +427,7 @@ class StandardVideoEndToEndTests(TransactionTestCase):
         upload = VideosUploaded.objects.get(codecurl_id=codecurl_id)
         self.assertTrue(upload.file_path.endswith(f"{codecurl_id}.mp4"))
         self.assertEqual(upload.mime_type, "video/mp4")
+        self.assertEqual(upload.title, "Real Title")
         self.assertTrue(Path(upload.file_path).exists())
 
         self.assertEqual(len(runner.calls), 1)

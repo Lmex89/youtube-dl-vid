@@ -119,7 +119,10 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
             })
         )
 
+        title_path = Path(settings.DOWNLOAD_LOGS_DIR) / f"{codecurl.id}.title.txt"
+        title_path.unlink(missing_ok=True)
         command = profile.build_command(codecurl.url, destination, workdir)
+        command += ["--print-to-file", "%(title)s", str(title_path)]
         run_download(
             command,
             log_path,
@@ -141,11 +144,18 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
                 runner=runner,
             )
 
+        title = (
+            title_path.read_text(errors="replace").strip()
+            if title_path.exists()
+            else ""
+        ) or destination.stem
+        title_path.unlink(missing_ok=True)
+
         codecurl = CodecUrls.objects.get(pk=codecurl_id)
         VideosUploaded.objects.create(
             file_path=str(destination),
             mime_type=profile.mime_type,
-            title="Test",
+            title=title[:250],
             codecurl=codecurl,
         )
         codecurl.status = StatusCodec.SUCCESS

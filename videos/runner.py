@@ -66,6 +66,7 @@ class FakeCommandRunner(CommandRunner):
     * ``fail`` — if truthy, raise ``RuntimeError`` after creating the file
     * ``error`` — error message when *fail* is truthy
     * ``log`` — text written to *log_path*
+    * ``title`` — media title written to the ``--print-to-file`` path, if present
     """
 
     def __init__(self, scripts=None):
@@ -102,6 +103,10 @@ class FakeCommandRunner(CommandRunner):
             out = Path(output_file)
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(script.get("output_content", b"fake"))
+
+        if "--print-to-file" in command and "title" in script:
+            title_file = Path(command[command.index("--print-to-file") + 2])
+            title_file.write_text(script["title"])
 
         for pct in script.get("progress", []):
             if progress_callback:
