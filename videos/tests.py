@@ -5,14 +5,15 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+from loguru import logger as loguru_logger
 from django.core.cache import caches
 from django.test import TestCase, TransactionTestCase, override_settings
 from rest_framework.test import APIClient
 
 from videos.download import (
-    _async_download_worker,
     cleanup_old_downloads,
     is_download_running,
+    stale_pending_jobs,
     start_download_async,
 )
 from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
@@ -112,90 +113,6 @@ class BuildCommandTests(TestCase):
     def test_whatsapp_target_bitrate_without_duration(self):
         profile = get_profile(OutputProfile.WHATSAPP_VIDEO)
         self.assertIsNone(profile._target_video_kbps(None, 128, 1024))
-
-
-class AsyncWorkerTests(TestCase):
-    def _temp_settings(self, tmp):
-        downloads = Path(tmp) / "downloads"
-        downloads.mkdir()
-        logs = Path(tmp) / "logs"
-        return override_settings(
-            DOWNLOADS_DIR=downloads,
-            DOWNLOAD_LOGS_DIR=logs,
-        )
-
-    def test_standard_worker_marks_success_and_stores_metadata(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with self._temp_settings(tmp):
-                codecurl = CodecUrls.objects.create(url="https://example.com")
-                with patch("videos.download.run_download"), patch(
-                    "videos.download.close_old_connections"
-                ):
-                    _async_download_worker(str(codecurl.id), "req-1")
-
-                codecurl.refresh_from_db()
-                self.assertEqual(codecurl.status, StatusCodec.SUCCESS)
-                self.assertEqual(codecurl.progress, 100.0)
-
-                upload = VideosUploaded.objects.get(codecurl=codecurl)
-                self.assertTrue(upload.file_path.endswith(f"{codecurl.id}.mp4"))
-                self.assertEqual(upload.mime_type, "video/mp4")
-
-    def test_worker_marks_error_when_download_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with self._temp_settings(tmp):
-                codecurl = CodecUrls.objects.create(url="https://example.com")
-                with patch(
-                    "videos.download.run_download",
-                    side_effect=RuntimeError("boom"),
-                ), patch("videos.download.close_old_connections"):
-                    _async_download_worker(str(codecurl.id), "req-2")
-
-                codecurl.refresh_from_db()
-                self.assertEqual(codecurl.status, StatusCodec.ERROR)
-                self.assertFalse(VideosUploaded.objects.exists())
-
-    def test_whatsapp_worker_runs_transcode_and_cleans_temp(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with self._temp_settings(tmp):
-                downloads = Path(tmp) / "downloads"
-                codecurl = CodecUrls.objects.create(
-                    url="https://example.com",
-                    output_profile=OutputProfile.WHATSAPP_VIDEO,
-                )
-                workdir = downloads / ".tmp" / str(codecurl.id)
-
-                def fake_download(command, log_path, progress_callback=None, timeout=300, runner=None):
-                    workdir.mkdir(parents=True, exist_ok=True)
-                    (workdir / "source.mp4").write_bytes(b"source")
-                    if progress_callback:
-                        progress_callback(100.0)
-
-                def fake_ffmpeg(command, log_path, duration=None, progress_callback=None, runner=None):
-                    Path(command[-1]).write_bytes(b"encoded")
-                    if progress_callback:
-                        progress_callback(100.0)
-
-                with patch(
-                    "videos.download.run_download", side_effect=fake_download
-                ), patch(
-                    "videos.profiles.run_ffmpeg", side_effect=fake_ffmpeg
-                ), patch(
-                    "videos.profiles.probe_duration", return_value=None
-                ), patch(
-                    "videos.download.close_old_connections"
-                ):
-                    _async_download_worker(str(codecurl.id), "req-3")
-
-                codecurl.refresh_from_db()
-                self.assertEqual(codecurl.status, StatusCodec.SUCCESS)
-                destination = downloads / f"{codecurl.id}.mp4"
-                self.assertTrue(destination.exists())
-                self.assertFalse(workdir.exists())
-
-                upload = VideosUploaded.objects.get(codecurl=codecurl)
-                self.assertEqual(upload.mime_type, "video/mp4")
-                self.assertEqual(upload.file_path, str(destination))
 
 
 class VideosUploadedPostTests(TestCase):
@@ -722,23 +639,29 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
             (self._downloads / ".tmp" / str(codecurl_id)).exists()
         )
 
-    @patch("videos.download._async_download_worker")
-    @patch("videos.download.logger.error")
-    def test_missing_request_is_logged_and_staging_is_removed(
-        self, mocked_error, mocked_worker
-    ):
-        def delete_request_and_run(codecurl_id, request_id):
-            staging = self._downloads / ".tmp" / codecurl_id
-            staging.mkdir(parents=True)
-            (staging / "partial").write_text("partial")
-            CodecUrls.objects.filter(pk=codecurl_id).delete()
-            _async_download_worker(codecurl_id, request_id)
+    def test_missing_request_is_logged_and_staging_is_removed(self):
+        downloads = self._downloads
 
-        mocked_worker.side_effect = delete_request_and_run
+        class DeletingRunner(FakeCommandRunner):
+            def run(self, command, log_path, label, timeout, *a, **kw):
+                if "-o" in command:
+                    cid = Path(command[command.index("-o") + 1]).parent.name
+                    (downloads / ".tmp" / cid).mkdir(parents=True, exist_ok=True)
+                    (downloads / ".tmp" / cid / "partial").write_text("partial")
+                    CodecUrls.objects.filter(pk=cid).delete()
+                return super().run(command, log_path, label, timeout, *a, **kw)
+
+        set_test_runner(DeletingRunner())
+        messages = []
+        sink = loguru_logger.add(messages.append, level="ERROR")
+        self.addCleanup(loguru_logger.remove, sink)
 
         post = self.client.post(
             "/api/v1/yt/videos-uploaded/",
-            {"url": "https://example.com/video"},
+            {
+                "url": "https://example.com/video",
+                "output_profile": OutputProfile.WHATSAPP_VIDEO,
+            },
             format="json",
         )
 
@@ -750,11 +673,7 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
             (self._downloads / ".tmp" / str(codecurl_id)).exists()
         )
         self.assertTrue(self._downloads.exists())
-        events = [
-            json.loads(call.args[0])
-            for call in mocked_error.call_args_list
-            if call.args
-        ]
+        events = [json.loads(m.record["message"]) for m in messages]
         self.assertTrue(
             any(
                 event.get("event") == "video_download_failed"
@@ -795,3 +714,46 @@ class ConcurrentStartTests(DownloadJobTestCase):
         self.assertEqual(len(runner.calls), 1)
         self.assertEqual(len(results), 8)
         self.assertTrue(all(r.id == codecurl.id for r in results))
+
+
+class LifecycleLoggingTests(DownloadJobTestCase):
+    def test_events_are_json_with_request_id_and_truncated_url(self):
+        set_test_runner(FakeCommandRunner())
+        messages = []
+        sink = loguru_logger.add(messages.append, level="INFO")
+        self.addCleanup(loguru_logger.remove, sink)
+        url = "https://example.com/watch?v=" + "x" * 200
+
+        post = self.client.post(
+            "/api/v1/yt/videos-uploaded/", {"url": url}, format="json"
+        )
+        _wait_for_download(post.data["id"])
+
+        events = [json.loads(m.record["message"]) for m in messages]
+        started = [e for e in events if e["event"] == "download_pipeline_started"]
+        self.assertEqual(len(started), 1)
+        self.assertIn("request_id", started[0])
+        self.assertLessEqual(len(started[0]["url_preview"]), 53)
+        lifecycle = [e for e in events if "codecurl_id" in e or "url_preview" in e]
+        self.assertNotIn(url, json.dumps(lifecycle))
+
+    @override_settings(MEDIA_PROCESS_TIMEOUT=42)
+    def test_single_timeout_setting_governs_download(self):
+        runner = FakeCommandRunner()
+        set_test_runner(runner)
+        post = self.client.post(
+            "/api/v1/yt/videos-uploaded/",
+            {"url": "https://example.com/v"},
+            format="json",
+        )
+        _wait_for_download(post.data["id"])
+        self.assertEqual(runner.calls[0]["timeout"], 42)
+
+
+class StaleJobTests(TestCase):
+    def test_lists_pending_jobs_without_a_running_thread(self):
+        stale = CodecUrls.objects.create(url="https://example.com/a")
+        CodecUrls.objects.create(
+            url="https://example.com/b", status=StatusCodec.SUCCESS
+        )
+        self.assertEqual(list(stale_pending_jobs()), [stale])

@@ -62,7 +62,7 @@ A `VideosUploaded` record is created only after the download succeeds.
 
 - **Rate limiting**: `django-ratelimit~=4.1` with `block=True`, key=`user_or_ip`, custom 429 view at `videos.views.ratelimited_error`. LocMemCache is per-process, so limits are enforced **per gunicorn worker**, not globally
 - **Migrations**: entrypoint runs `makemigrations --no-input` then `migrate` on every start, so missing migrations are auto-generated — still create and commit them with `docker compose exec web python manage.py makemigrations` after model changes
-- **Download timeouts**: subprocess capped at `DOWNLOAD_TIMEOUT=300s` (kills hung yt-dlp); `--socket-timeout 30` guards against network stalls
+- **Download timeouts**: subprocesses capped at `settings.MEDIA_PROCESS_TIMEOUT=300s` (kills hung yt-dlp/ffmpeg; list orphaned `status=2` jobs with `manage.py list_stale_jobs`); `--socket-timeout 30` guards against network stalls
 - **No lint / format / typecheck config** exists
 - **Logging**: structured JSON via Loguru (`serialize=True`) at `/var/log/gunicorn/`, with stdlib logs intercepted by `InterceptHandler`:
   - `app.log` (INFO+, 30-day retention)
