@@ -1,7 +1,5 @@
 import json
 import logging
-import mimetypes
-from pathlib import Path
 
 from django.http import FileResponse, JsonResponse
 from django.utils.decorators import method_decorator
@@ -9,7 +7,7 @@ from django_ratelimit.decorators import ratelimit
 from rest_framework import generics, status
 from rest_framework.response import Response
 
-from videos.download import cleanup_old_downloads, start_download_async
+from videos.download import start_download_async
 from videos.models import Categorias, CodecUrls, OutputProfile, VideosUploaded
 from videos.profiles import PROFILES, get_profile
 from videos.serializers import (
@@ -17,6 +15,7 @@ from videos.serializers import (
     CodecUrlsSerializer,
     VideosUpladedSerializer,
 )
+from videos.storage import DownloadStorage
 
 logger = logging.getLogger("videos")
 
@@ -191,17 +190,6 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
             })
         )
 
-        cleanup_old_downloads(codecurl)
-        logger.info(
-            json.dumps({
-                "event": "old_downloads_cleaned",
-                "codecurl_id": str(codecurl.id),
-                "url_preview": url[:50] + "..." if len(url) > 50 else url,
-                "output_profile": profile.name,
-                "request_id": request_id,
-            })
-        )
-
         start_download_async(codecurl, request_id=request_id)
         logger.info(
             json.dumps({
@@ -233,68 +221,51 @@ class VideosUploadedDetailAPIView(generics.RetrieveAPIView):
     def get(self, request, *args, **kwargs):
         upload = self.get_object()
         request_id = getattr(request, "request_id", "unknown")
+        served = DownloadStorage().resolve(upload)
 
-        if not upload.file_path:
-            logger.warning(
-                json.dumps({
-                    "event": "video_file_not_found",
-                    "upload_id": str(upload.id),
-                    "reason": "empty_file_path",
-                    "request_id": request_id,
-                })
-            )
+        if served.path is None or not served.exists:
+            details = {
+                "event": "video_file_not_found",
+                "upload_id": str(upload.id),
+                "reason": (
+                    "empty_file_path"
+                    if served.path is None
+                    else "file_not_found"
+                ),
+                "request_id": request_id,
+            }
+            if served.path is not None:
+                details["file_path"] = served.path.name
+            logger.warning(json.dumps(details))
             return Response(
                 data={"error": "file not found"},
                 status=status.HTTP_404_NOT_FOUND,
             )
-
-        file_path = Path(upload.file_path)
 
         logger.debug(
             json.dumps({
                 "event": "video_file_download_requested",
                 "upload_id": str(upload.id),
-                "file_path": str(file_path),
+                "file_path": str(served.path),
                 "user": getattr(request.user, "username", "anonymous"),
                 "request_id": request_id,
             })
-        )
-
-        if not file_path.exists():
-            logger.warning(
-                json.dumps({
-                    "event": "video_file_not_found",
-                    "upload_id": str(upload.id),
-                    "file_path": str(file_path),
-                    "request_id": request_id,
-                })
-            )
-            return Response(
-                data={"error": "file not found"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        content_type = (
-            upload.mime_type
-            or mimetypes.guess_type(file_path.name)[0]
-            or "application/octet-stream"
         )
 
         logger.info(
             json.dumps({
                 "event": "video_file_streaming",
                 "upload_id": str(upload.id),
-                "filename": file_path.name,
-                "mime_type": content_type,
-                "size_bytes": file_path.stat().st_size,
+                "filename": served.path.name,
+                "mime_type": served.mime_type,
+                "size_bytes": served.path.stat().st_size,
                 "request_id": request_id,
             })
         )
 
-        response = FileResponse(
-            open(file_path, "rb"),
+        return FileResponse(
+            open(served.path, "rb"),
             as_attachment=True,
-            filename=f"{upload.id}{file_path.suffix}",
-            content_type=content_type,
+            filename=served.filename,
+            content_type=served.mime_type,
         )
-        return response
