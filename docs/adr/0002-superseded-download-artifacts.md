@@ -2,8 +2,7 @@
 
 Cuando una Solicitud de descarga (`CodecUrls`) termina exitosamente, reemplaza a las
 solicitudes anteriores con la misma URL y perfil de salida: sus archivos finales,
-directorios de staging, logs y Videos subidos (`VideosUploaded`) se eliminan. Falta
-decidir qué pasa con las filas de `CodecUrls` reemplazadas.
+directorios de staging, logs y Videos subidos (`VideosUploaded`) se eliminan.
 
 Se decidió eliminar también las filas de `CodecUrls` reemplazadas **solo cuando su
 estado es `SUCCESS`** (`StatusCodec.SUCCESS`). Los intentos fallidos (`ERROR`) se
@@ -27,3 +26,5 @@ Consecuencias:
 - Los intentos fallidos permanecen consultables como historial.
 - El conteo `codecurls_deleted` de los eventos de ciclo de vida refleja únicamente las
   filas realmente eliminadas.
+- La limpieza de huérfanos solo borra archivos que estén bajo el directorio de
+  descargas; nunca toca rutas arbitrarias.

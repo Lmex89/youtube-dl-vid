@@ -1,6 +1,7 @@
 """Single owner of the physical layout of download artifacts."""
 
 import json
+import logging
 import mimetypes
 import shutil
 from dataclasses import dataclass
@@ -8,7 +9,6 @@ from pathlib import Path
 from typing import Optional
 
 from django.conf import settings
-from loguru import logger
 
 from videos.models import CodecUrls, StatusCodec, VideosUploaded
 from videos.profiles import get_profile
@@ -16,8 +16,10 @@ from videos.profiles import get_profile
 STAGING_DIR_NAME = ".tmp"
 URL_PREVIEW_LEN = 50
 
+logger = logging.getLogger("videos")
 
-def _preview(url: str) -> str:
+
+def preview_url(url: str) -> str:
     return url[:URL_PREVIEW_LEN] + ("..." if len(url) > URL_PREVIEW_LEN else "")
 
 
@@ -191,8 +193,8 @@ class DownloadStorage:
             counts["uploads_deleted"] += deleted
 
             if old_codecurl and old_codecurl.status == StatusCodec.SUCCESS:
-                old_codecurl.delete()
-                counts["codecurls_deleted"] += 1
+                deleted, _ = old_codecurl.delete()
+                counts["codecurls_deleted"] += deleted
 
             if self._delete_file(paths.final):
                 counts["files_deleted"] += 1
@@ -210,7 +212,7 @@ class DownloadStorage:
             json.dumps({
                 "event": "download_superseded",
                 "codecurl_id": str(codecurl.id),
-                "url_preview": _preview(codecurl.url),
+                "url_preview": preview_url(codecurl.url),
                 "output_profile": codecurl.output_profile,
                 **counts,
                 "request_id": request_id,
