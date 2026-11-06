@@ -9,7 +9,7 @@ from django_ratelimit.decorators import ratelimit
 from rest_framework import generics, status
 from rest_framework.response import Response
 
-from videos.download import cleanup_old_downloads, start_download_async
+from videos.download import start_download_async
 from videos.models import Categorias, CodecUrls, OutputProfile, VideosUploaded
 from videos.profiles import PROFILES, get_profile
 from videos.serializers import (
@@ -186,17 +186,6 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
             json.dumps({
                 "event": "codecurl_created",
                 "codecurl_id": str(codecurl.id),
-                "output_profile": profile.name,
-                "request_id": request_id,
-            })
-        )
-
-        cleanup_old_downloads(codecurl)
-        logger.info(
-            json.dumps({
-                "event": "old_downloads_cleaned",
-                "codecurl_id": str(codecurl.id),
-                "url_preview": url[:50] + "..." if len(url) > 50 else url,
                 "output_profile": profile.name,
                 "request_id": request_id,
             })
