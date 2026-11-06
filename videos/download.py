@@ -187,6 +187,19 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
         codecurl.progress = 100.0
         codecurl.save(update_fields=["status", "progress", "updated_at"])
 
+        try:
+            storage.commit(codecurl, request_id=request_id)
+        except Exception as exc:
+            logger.error(
+                json.dumps({
+                    "event": "download_supersede_failed",
+                    "codecurl_id": codecurl_id,
+                    "error": str(exc)[:100],
+                    "error_type": exc.__class__.__name__,
+                    "request_id": request_id,
+                })
+            )
+
         logger.info(
             json.dumps({
                 "event": "video_download_completed",
@@ -215,44 +228,3 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
         with _threads_lock:
             _download_threads.pop(codecurl_id, None)
         close_old_connections()
-
-
-def cleanup_old_downloads(current_codecurl: CodecUrls) -> None:
-    old_urls = CodecUrls.objects.filter(
-        url=current_codecurl.url,
-        output_profile=current_codecurl.output_profile,
-    ).exclude(id=current_codecurl.id)
-    old_count = old_urls.count()
-
-    if old_count > 0:
-        logger.info(
-            json.dumps({
-                "event": "cleaning_up_old_downloads",
-                "url_preview": _preview(current_codecurl.url),
-                "output_profile": current_codecurl.output_profile,
-                "old_urls_count": old_count,
-            })
-        )
-
-    old_uploads = VideosUploaded.objects.filter(codecurl__in=old_urls)
-    deleted_count = 0
-
-    for upload in old_uploads:
-        if upload.file_path:
-            Path(upload.file_path).unlink(missing_ok=True)
-            deleted_count += 1
-            logger.debug(f"Deleted old media file: {upload.file_path}")
-
-    storage = DownloadStorage()
-    for old_codecurl in old_urls:
-        storage.discard_staging(str(old_codecurl.id))
-
-    old_uploads.delete()
-
-    logger.debug(
-        json.dumps({
-            "event": "cleanup_completed",
-            "files_deleted": deleted_count,
-            "records_deleted": old_count,
-        })
-    )
