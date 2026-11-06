@@ -117,7 +117,10 @@ class DownloadStorage:
 
     @staticmethod
     def _superseded_ids(codecurl) -> list:
-        return list(
+        # Lazy import: videos.download imports storage at module scope.
+        from videos.download import is_download_running
+
+        earlier = (
             CodecUrls.objects.filter(
                 url=codecurl.url,
                 output_profile=codecurl.output_profile,
@@ -126,6 +129,11 @@ class DownloadStorage:
             .exclude(pk=codecurl.pk)
             .values_list("id", flat=True)
         )
+        return [
+            old_id
+            for old_id in earlier
+            if not is_download_running(str(old_id))
+        ]
 
     @staticmethod
     def _delete_file(path: Path) -> bool:

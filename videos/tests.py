@@ -1092,6 +1092,96 @@ class SupersedeOnSuccessTests(DownloadJobTestCase):
         )
 
 
+class RunningJobProtectionTests(DownloadJobTestCase):
+    """Supersession must leave jobs that are still running alone."""
+
+    URL = "https://example.com/same"
+
+    class GatedRunner(FakeCommandRunner):
+        """Block the first completed run so its job stays registered."""
+
+        def __init__(self, scripts=None):
+            super().__init__(scripts=scripts)
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self._gated = False
+
+        def run(self, *args, **kwargs):
+            result = super().run(*args, **kwargs)
+            if not self._gated:
+                self._gated = True
+                self.entered.set()
+                self.release.wait(5)
+            return result
+
+    def _post(self, profile=None):
+        payload = {"url": self.URL}
+        if profile:
+            payload["output_profile"] = profile
+        post = self.client.post(
+            "/api/v1/yt/videos-uploaded/", payload, format="json"
+        )
+        self.assertEqual(post.status_code, 202)
+        return post.data["id"]
+
+    def test_repeated_post_keeps_running_jobs_staging_and_output(self):
+        runner = self.GatedRunner(scripts=[{}, {}, {}, {}])
+        set_test_runner(runner)
+        with patch("videos.profiles.probe_duration", return_value=None):
+            first_id = self._post(OutputProfile.WHATSAPP_VIDEO)
+            self.assertTrue(runner.entered.wait(5))
+
+            staging = self._downloads / STAGING_DIR_NAME / first_id
+            log = self._logs / f"{first_id}.txt"
+            staged = [path for path in staging.iterdir()]
+            self.assertTrue(staged)
+            self.assertTrue(log.exists())
+
+            second_id = self._post(OutputProfile.WHATSAPP_VIDEO)
+            _wait_for_download(second_id)
+
+            self.assertTrue(staging.is_dir())
+            for path in staged:
+                self.assertTrue(path.exists(), path)
+            self.assertTrue(log.exists())
+
+            runner.release.set()
+            _wait_for_download(first_id)
+
+        first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
+        second_upload = VideosUploaded.objects.get(codecurl_id=second_id)
+        self.assertTrue(Path(first_upload.file_path).exists())
+        self.assertTrue(Path(second_upload.file_path).exists())
+        self.assertTrue((self._downloads / f"{second_id}.mp4").exists())
+
+    def test_finishing_job_keeps_artifacts_of_running_job(self):
+        runner = self.GatedRunner(scripts=[{}, {}])
+        set_test_runner(runner)
+        first_id = self._post()
+        self.assertTrue(runner.entered.wait(5))
+
+        first_final = self._downloads / f"{first_id}.mp4"
+        first_log = self._logs / f"{first_id}.txt"
+        self.assertTrue(first_final.exists())
+        self.assertTrue(first_log.exists())
+
+        second_id = self._post()
+        _wait_for_download(second_id)
+
+        self.assertTrue(first_final.exists())
+        self.assertTrue(first_log.exists())
+
+        runner.release.set()
+        _wait_for_download(first_id)
+
+        first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
+        self.assertTrue(Path(first_upload.file_path).exists())
+        self.assertTrue((self._downloads / f"{second_id}.mp4").exists())
+        self.assertTrue(
+            VideosUploaded.objects.filter(codecurl_id=second_id).exists()
+        )
+
+
 class ConcurrentStartTests(DownloadJobTestCase):
     def test_concurrent_starts_run_exactly_one_job(self):
         release = threading.Event()
