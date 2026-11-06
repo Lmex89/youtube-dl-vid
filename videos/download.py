@@ -1,5 +1,4 @@
 import json
-import shutil
 import threading
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -13,17 +12,10 @@ from videos.models import CodecUrls, StatusCodec, VideosUploaded
 from videos.process import parse_yt_dlp_progress, run_process
 from videos.profiles import get_profile
 from videos.runner import CommandRunner, get_command_runner
-
-TMP_DIR_NAME = ".tmp"
-
-URL_PREVIEW_LEN = 50
+from videos.storage import DownloadStorage, preview_url
 
 _download_threads: dict = {}
 _threads_lock = threading.Lock()
-
-
-def _preview(url: str) -> str:
-    return url[:URL_PREVIEW_LEN] + ("..." if len(url) > URL_PREVIEW_LEN else "")
 
 
 def stale_pending_jobs():
@@ -115,10 +107,7 @@ def start_download_async(codecurl: CodecUrls, request_id: str = "unknown") -> Co
 
 def _async_download_worker(codecurl_id: str, request_id: str) -> None:
     close_old_connections()
-    downloads_dir = Path(settings.DOWNLOADS_DIR)
-    staging_root = downloads_dir / TMP_DIR_NAME
-    staging_dir = staging_root / codecurl_id
-    workdir: Optional[Path] = None
+    storage = DownloadStorage(is_running=is_download_running)
     runner = get_command_runner()
 
     save_progress = ProgressSaver(codecurl_id)
@@ -126,15 +115,13 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
     try:
         codecurl = CodecUrls.objects.get(pk=codecurl_id)
         profile = get_profile(codecurl.output_profile)
+        paths = storage.job_paths(codecurl_id, profile)
 
-        destination = downloads_dir / f"{codecurl.id}.{profile.extension}"
-        log_path = Path(settings.DOWNLOAD_LOGS_DIR) / f"{codecurl.id}.txt"
-
+        destination = paths.final
+        log_path = paths.log
+        workdir = paths.workdir
         if profile.uses_temporary_files:
-            workdir = staging_dir
             workdir.mkdir(parents=True, exist_ok=True)
-        else:
-            workdir = downloads_dir
 
         download_weight = profile.download_weight
 
@@ -150,12 +137,12 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
                 "event": "download_pipeline_started",
                 "codecurl_id": codecurl_id,
                 "output_profile": profile.name,
-                "url_preview": _preview(codecurl.url),
+                "url_preview": preview_url(codecurl.url),
                 "request_id": request_id,
             })
         )
 
-        title_path = Path(settings.DOWNLOAD_LOGS_DIR) / f"{codecurl.id}.title.txt"
+        title_path = paths.title_log
         title_path.unlink(missing_ok=True)
         command = profile.build_command(codecurl.url, destination, workdir)
         command += ["--print-to-file", "%(title)s", str(title_path)]
@@ -168,14 +155,10 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
 
         source = profile.locate_source(workdir, destination)
         if profile.uses_temporary_files:
-            process_log = (
-                Path(settings.DOWNLOAD_LOGS_DIR)
-                / f"{codecurl.id}.ffmpeg.txt"
-            )
             profile.post_process(
                 source,
                 destination,
-                process_log,
+                paths.process_log,
                 on_process_progress,
                 runner=runner,
             )
@@ -197,6 +180,19 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
         codecurl.status = StatusCodec.SUCCESS
         codecurl.progress = 100.0
         codecurl.save(update_fields=["status", "progress", "updated_at"])
+
+        try:
+            storage.supersede_earlier(codecurl, request_id=request_id)
+        except Exception as exc:
+            logger.exception(
+                json.dumps({
+                    "event": "download_supersede_failed",
+                    "codecurl_id": codecurl_id,
+                    "error": str(exc)[:100],
+                    "error_type": exc.__class__.__name__,
+                    "request_id": request_id,
+                })
+            )
 
         logger.info(
             json.dumps({
@@ -222,55 +218,7 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
             codecurl.status = StatusCodec.ERROR
             codecurl.save(update_fields=["status", "updated_at"])
     finally:
-        if (
-            codecurl_id not in {".", ".."}
-            and Path(codecurl_id).name == codecurl_id
-            and staging_dir.parent == staging_root
-            and not staging_root.is_symlink()
-            and not staging_dir.is_symlink()
-        ):
-            shutil.rmtree(staging_dir, ignore_errors=True)
+        storage.discard_staging(codecurl_id)
         with _threads_lock:
             _download_threads.pop(codecurl_id, None)
         close_old_connections()
-
-
-def cleanup_old_downloads(current_codecurl: CodecUrls) -> None:
-    old_urls = CodecUrls.objects.filter(
-        url=current_codecurl.url,
-        output_profile=current_codecurl.output_profile,
-    ).exclude(id=current_codecurl.id)
-    old_count = old_urls.count()
-
-    if old_count > 0:
-        logger.info(
-            json.dumps({
-                "event": "cleaning_up_old_downloads",
-                "url_preview": _preview(current_codecurl.url),
-                "output_profile": current_codecurl.output_profile,
-                "old_urls_count": old_count,
-            })
-        )
-
-    old_uploads = VideosUploaded.objects.filter(codecurl__in=old_urls)
-    deleted_count = 0
-
-    for upload in old_uploads:
-        if upload.file_path:
-            Path(upload.file_path).unlink(missing_ok=True)
-            deleted_count += 1
-            logger.debug(f"Deleted old media file: {upload.file_path}")
-
-    tmp_root = Path(settings.DOWNLOADS_DIR) / TMP_DIR_NAME
-    for old_codecurl in old_urls:
-        shutil.rmtree(tmp_root / str(old_codecurl.id), ignore_errors=True)
-
-    old_uploads.delete()
-
-    logger.debug(
-        json.dumps({
-            "event": "cleanup_completed",
-            "files_deleted": deleted_count,
-            "records_deleted": old_count,
-        })
-    )

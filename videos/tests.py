@@ -2,16 +2,19 @@ import json
 import tempfile
 import threading
 import time
+from datetime import timedelta
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 from loguru import logger as loguru_logger
 from django.core.cache import caches
+from django.core.management import call_command
 from django.test import TestCase, TransactionTestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from videos.download import (
-    cleanup_old_downloads,
     is_download_running,
     stale_pending_jobs,
     start_download_async,
@@ -19,6 +22,7 @@ from videos.download import (
 from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
 from videos.profiles import PROFILES, get_profile
 from videos.runner import FakeCommandRunner, set_test_runner
+from videos.storage import STAGING_DIR_NAME, DownloadStorage
 
 
 class ProfileRegistryTests(TestCase):
@@ -64,7 +68,7 @@ class BuildCommandTests(TestCase):
         command = get_profile(OutputProfile.WHATSAPP_VIDEO).build_command(
             "https://example.com/video",
             Path("/tmp/downloads/video.mp4"),
-            Path("/tmp/downloads/.tmp"),
+            Path("/tmp/downloads") / STAGING_DIR_NAME,
         )
         output_template = command[command.index("-o") + 1]
         self.assertTrue(output_template.endswith("source.%(ext)s"))
@@ -74,7 +78,7 @@ class BuildCommandTests(TestCase):
         command = get_profile(OutputProfile.AUDIO_M4A).build_command(
             "https://example.com/video",
             Path("/tmp/downloads/audio.m4a"),
-            Path("/tmp/downloads/.tmp"),
+            Path("/tmp/downloads") / STAGING_DIR_NAME,
         )
         self.assertIn("-x", command)
         self.assertEqual(command[command.index("--audio-format") + 1], "m4a")
@@ -113,6 +117,74 @@ class BuildCommandTests(TestCase):
     def test_whatsapp_target_bitrate_without_duration(self):
         profile = get_profile(OutputProfile.WHATSAPP_VIDEO)
         self.assertIsNone(profile._target_video_kbps(None, 128, 1024))
+
+
+class DownloadStorageTests(TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.downloads = root / "downloads"
+        self.logs = root / "logs"
+        self.storage = DownloadStorage(
+            downloads_dir=self.downloads, logs_dir=self.logs
+        )
+        self.codecurl_id = "1234abcd-0000-0000-0000-000000000000"
+
+    def test_job_paths_place_final_staging_and_logs_under_injected_roots(self):
+        profile = get_profile(OutputProfile.WHATSAPP_VIDEO)
+
+        paths = self.storage.job_paths(self.codecurl_id, profile)
+
+        self.assertEqual(
+            paths.final, self.downloads / f"{self.codecurl_id}.mp4"
+        )
+        self.assertEqual(
+            paths.workdir,
+            self.downloads / STAGING_DIR_NAME / self.codecurl_id,
+        )
+        self.assertEqual(paths.log, self.logs / f"{self.codecurl_id}.txt")
+        self.assertEqual(
+            paths.process_log, self.logs / f"{self.codecurl_id}.ffmpeg.txt"
+        )
+        self.assertEqual(
+            paths.title_log, self.logs / f"{self.codecurl_id}.title.txt"
+        )
+
+    def test_standard_profile_works_in_downloads_root(self):
+        profile = get_profile(OutputProfile.STANDARD_VIDEO)
+
+        paths = self.storage.job_paths(self.codecurl_id, profile)
+
+        self.assertEqual(paths.workdir, self.downloads)
+        self.assertEqual(
+            paths.final, self.downloads / f"{self.codecurl_id}.mp4"
+        )
+
+    def test_discard_staging_removes_only_that_job_and_keeps_root(self):
+        job = self.downloads / STAGING_DIR_NAME / self.codecurl_id
+        other = self.downloads / STAGING_DIR_NAME / "another-job"
+        job.mkdir(parents=True)
+        (job / "partial.mp4").write_text("partial")
+        other.mkdir(parents=True)
+        keep = self.downloads / "keep.txt"
+        keep.write_text("keep")
+
+        self.storage.discard_staging(self.codecurl_id)
+        self.storage.discard_staging(self.codecurl_id)
+
+        self.assertFalse(job.exists())
+        self.assertTrue(other.exists())
+        self.assertTrue((self.downloads / STAGING_DIR_NAME).exists())
+        self.assertTrue(keep.exists())
+
+    def test_discard_staging_never_removes_the_staging_root(self):
+        self.downloads.mkdir(parents=True)
+
+        self.storage.discard_staging("..")
+        self.storage.discard_staging("")
+
+        self.assertTrue(self.downloads.exists())
 
 
 class VideosUploadedPostTests(TestCase):
@@ -207,39 +279,118 @@ class VideosUploadedFileTests(TestCase):
     def setUp(self):
         caches["ratelimit"].clear()
         self.client = APIClient()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.downloads = Path(self._tmp.name) / "downloads"
+        self.downloads.mkdir()
+        self._settings = override_settings(DOWNLOADS_DIR=self.downloads)
+        self._settings.enable()
+        self.addCleanup(self._settings.disable)
 
-    def test_download_uses_profile_mime_and_extension(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            file_path = Path(tmp) / "audio.m4a"
-            file_path.write_bytes(b"audio-bytes")
-            codecurl = CodecUrls.objects.create(
-                url="https://example.com/v",
-                output_profile=OutputProfile.AUDIO_M4A,
-            )
-            upload = VideosUploaded.objects.create(
-                file_path=str(file_path),
-                mime_type="audio/mp4",
-                codecurl=codecurl,
-            )
+    def _upload_with_file(
+        self, profile, content=b"media-bytes", mime_type=""
+    ):
+        codecurl = CodecUrls.objects.create(
+            url="https://example.com/v", output_profile=profile
+        )
+        path = self.downloads / f"{codecurl.id}.{get_profile(profile).extension}"
+        path.write_bytes(content)
+        return VideosUploaded.objects.create(
+            file_path=str(path), mime_type=mime_type, codecurl=codecurl
+        )
 
-            response = self.client.get(
-                f"/api/v1/yt/videos-uploaded/{upload.id}"
-            )
+    def test_standard_video_served_with_profile_mime_and_extension(self):
+        upload = self._upload_with_file(
+            OutputProfile.STANDARD_VIDEO, mime_type="application/octet-stream"
+        )
 
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response["Content-Type"], "audio/mp4")
-            self.assertIn(f"{upload.id}.m4a", response["Content-Disposition"])
-            b"".join(response.streaming_content)
+        response = self.client.get(
+            f"/api/v1/yt/videos-uploaded/{upload.id}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "video/mp4")
+        self.assertIn(f"{upload.id}.mp4", response["Content-Disposition"])
+        self.assertEqual(
+            b"".join(response.streaming_content), b"media-bytes"
+        )
+
+    def test_whatsapp_video_served_with_profile_mime_and_extension(self):
+        upload = self._upload_with_file(
+            OutputProfile.WHATSAPP_VIDEO, mime_type="video/quicktime"
+        )
+
+        response = self.client.get(
+            f"/api/v1/yt/videos-uploaded/{upload.id}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "video/mp4")
+        self.assertIn(f"{upload.id}.mp4", response["Content-Disposition"])
+        self.assertEqual(
+            b"".join(response.streaming_content), b"media-bytes"
+        )
+
+    def test_audio_m4a_served_with_profile_mime_and_extension(self):
+        upload = self._upload_with_file(
+            OutputProfile.AUDIO_M4A, content=b"audio-bytes"
+        )
+
+        response = self.client.get(
+            f"/api/v1/yt/videos-uploaded/{upload.id}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "audio/mp4")
+        self.assertIn(f"{upload.id}.m4a", response["Content-Disposition"])
+        self.assertEqual(
+            b"".join(response.streaming_content), b"audio-bytes"
+        )
 
     def test_download_returns_404_when_file_missing(self):
         codecurl = CodecUrls.objects.create(url="https://example.com/v")
         upload = VideosUploaded.objects.create(
-            file_path="/tmp/does-not-exist-anywhere.mp4",
+            file_path=str(self.downloads / f"{codecurl.id}.mp4"),
             mime_type="video/mp4",
             codecurl=codecurl,
         )
+
         response = self.client.get(f"/api/v1/yt/videos-uploaded/{upload.id}")
+
         self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.data, {"error": "file not found"})
+
+    def test_download_returns_404_when_stored_path_is_empty(self):
+        codecurl = CodecUrls.objects.create(url="https://example.com/v")
+
+        for file_path in ("", None):
+            with self.subTest(file_path=file_path):
+                upload = VideosUploaded.objects.create(
+                    file_path=file_path, codecurl=codecurl
+                )
+                response = self.client.get(
+                    f"/api/v1/yt/videos-uploaded/{upload.id}"
+                )
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(
+                    response.data, {"error": "file not found"}
+                )
+
+    def test_null_codecurl_falls_back_to_stored_mime_and_suffix(self):
+        path = self.downloads / "legacy.m4a"
+        path.write_bytes(b"legacy-bytes")
+        upload = VideosUploaded.objects.create(
+            file_path=str(path), mime_type="audio/mp4", codecurl=None
+        )
+
+        response = self.client.get(f"/api/v1/yt/videos-uploaded/{upload.id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "audio/mp4")
+        self.assertIn(f"{upload.id}.m4a", response["Content-Disposition"])
+        self.assertEqual(
+            b"".join(response.streaming_content), b"legacy-bytes"
+        )
 
     def test_serializer_exposes_file_metadata(self):
         codecurl = CodecUrls.objects.create(url="https://example.com/v")
@@ -252,41 +403,6 @@ class VideosUploadedFileTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data[0]["video"], "/tmp/video.mp4")
         self.assertEqual(response.data[0]["mime_type"], "video/mp4")
-
-
-class CleanupTests(TestCase):
-    def test_cleanup_is_scoped_by_output_profile(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with override_settings(DOWNLOADS_DIR=Path(tmp)):
-                old_standard = CodecUrls.objects.create(
-                    url="https://example.com/same",
-                    output_profile=OutputProfile.STANDARD_VIDEO,
-                )
-                old_audio = CodecUrls.objects.create(
-                    url="https://example.com/same",
-                    output_profile=OutputProfile.AUDIO_M4A,
-                )
-                current = CodecUrls.objects.create(
-                    url="https://example.com/same",
-                    output_profile=OutputProfile.STANDARD_VIDEO,
-                )
-                standard_upload = VideosUploaded.objects.create(
-                    file_path="",
-                    codecurl=old_standard,
-                )
-                audio_upload = VideosUploaded.objects.create(
-                    file_path="",
-                    codecurl=old_audio,
-                )
-
-                cleanup_old_downloads(current)
-
-                self.assertFalse(
-                    VideosUploaded.objects.filter(pk=standard_upload.pk).exists()
-                )
-                self.assertTrue(
-                    VideosUploaded.objects.filter(pk=audio_upload.pk).exists()
-                )
 
 
 def _wait_for_download(codecurl_id: str, timeout: float = 5.0) -> None:
@@ -378,6 +494,64 @@ class StandardVideoEndToEndTests(DownloadJobTestCase):
         self.assertEqual(get.status_code, 200)
         self.assertEqual(get.data["status"], StatusCodec.ERROR)
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
+
+
+class StorageLayoutEndToEndTests(DownloadJobTestCase):
+    """HTTP jobs keep final files and logs under the injected roots."""
+
+    def test_standard_success_uses_storage_layout(self):
+        runner = FakeCommandRunner(scripts=[{"progress": [100.0]}])
+        set_test_runner(runner)
+
+        post = self.client.post(
+            "/api/v1/yt/videos-uploaded/",
+            {"url": "https://example.com/video"},
+            format="json",
+        )
+        codecurl_id = post.data["id"]
+        _wait_for_download(codecurl_id)
+
+        upload = VideosUploaded.objects.get(codecurl_id=codecurl_id)
+        self.assertEqual(
+            upload.file_path, str(self._downloads / f"{codecurl_id}.mp4")
+        )
+        self.assertTrue((self._downloads / f"{codecurl_id}.mp4").exists())
+        self.assertTrue((self._logs / f"{codecurl_id}.txt").exists())
+        self.assertFalse(
+            (self._downloads / STAGING_DIR_NAME / codecurl_id).exists()
+        )
+
+        get = self.client.get(f"/api/v1/yt/videos-uploaded/{upload.id}")
+        self.assertEqual(get.status_code, 200)
+        b"".join(get.streaming_content)
+
+    def test_whatsapp_success_uses_storage_layout_for_process_log(self):
+        runner = FakeCommandRunner(
+            scripts=[{"progress": [100.0]}, {"progress": [100.0]}]
+        )
+        set_test_runner(runner)
+
+        with patch("videos.profiles.probe_duration", return_value=None):
+            post = self.client.post(
+                "/api/v1/yt/videos-uploaded/",
+                {
+                    "url": "https://example.com/video",
+                    "output_profile": OutputProfile.WHATSAPP_VIDEO,
+                },
+                format="json",
+            )
+        codecurl_id = post.data["id"]
+        _wait_for_download(codecurl_id)
+
+        upload = VideosUploaded.objects.get(codecurl_id=codecurl_id)
+        self.assertEqual(
+            upload.file_path, str(self._downloads / f"{codecurl_id}.mp4")
+        )
+        self.assertTrue((self._logs / f"{codecurl_id}.txt").exists())
+        self.assertTrue((self._logs / f"{codecurl_id}.ffmpeg.txt").exists())
+        self.assertFalse(
+            (self._downloads / STAGING_DIR_NAME / codecurl_id).exists()
+        )
 
 
 class RecordingRunner(FakeCommandRunner):
@@ -548,7 +722,7 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
         self.assertEqual(get.data["status"], StatusCodec.ERROR)
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
         self.assertFalse(
-            (self._downloads / ".tmp" / str(codecurl_id)).exists()
+            (self._downloads / STAGING_DIR_NAME / str(codecurl_id)).exists()
         )
 
     def test_success_removes_staging_over_http(self):
@@ -577,7 +751,7 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
         self.assertEqual(get.data["status"], StatusCodec.SUCCESS)
         self.assertTrue(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
         self.assertFalse(
-            (self._downloads / ".tmp" / str(codecurl_id)).exists()
+            (self._downloads / STAGING_DIR_NAME / str(codecurl_id)).exists()
         )
         self.assertTrue(sentinel.exists())
 
@@ -610,7 +784,7 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
         self.assertEqual(get.data["status"], StatusCodec.ERROR)
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
         self.assertFalse(
-            (self._downloads / ".tmp" / str(codecurl_id)).exists()
+            (self._downloads / STAGING_DIR_NAME / str(codecurl_id)).exists()
         )
         self.assertTrue(sentinel.exists())
 
@@ -636,7 +810,7 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
         self.assertEqual(get.data["status"], StatusCodec.ERROR)
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
         self.assertFalse(
-            (self._downloads / ".tmp" / str(codecurl_id)).exists()
+            (self._downloads / STAGING_DIR_NAME / str(codecurl_id)).exists()
         )
 
     def test_missing_request_is_logged_and_staging_is_removed(self):
@@ -646,8 +820,12 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
             def run(self, command, log_path, label, timeout, *a, **kw):
                 if "-o" in command:
                     cid = Path(command[command.index("-o") + 1]).parent.name
-                    (downloads / ".tmp" / cid).mkdir(parents=True, exist_ok=True)
-                    (downloads / ".tmp" / cid / "partial").write_text("partial")
+                    (downloads / STAGING_DIR_NAME / cid).mkdir(
+                        parents=True, exist_ok=True
+                    )
+                    (downloads / STAGING_DIR_NAME / cid / "partial").write_text(
+                        "partial"
+                    )
                     CodecUrls.objects.filter(pk=cid).delete()
                 return super().run(command, log_path, label, timeout, *a, **kw)
 
@@ -670,7 +848,7 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
         _wait_for_download(codecurl_id)
         self.assertFalse(CodecUrls.objects.filter(pk=codecurl_id).exists())
         self.assertFalse(
-            (self._downloads / ".tmp" / str(codecurl_id)).exists()
+            (self._downloads / STAGING_DIR_NAME / str(codecurl_id)).exists()
         )
         self.assertTrue(self._downloads.exists())
         events = [json.loads(m.record["message"]) for m in messages]
@@ -680,6 +858,353 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
                 and event.get("error_type") == "DoesNotExist"
                 for event in events
             )
+        )
+
+
+class SupersedeOnSuccessTests(DownloadJobTestCase):
+    """A successful job replaces earlier jobs for the same URL and profile."""
+
+    def _post(self, url, profile=None):
+        payload = {"url": url}
+        if profile:
+            payload["output_profile"] = profile
+        post = self.client.post(
+            "/api/v1/yt/videos-uploaded/", payload, format="json"
+        )
+        self.assertEqual(post.status_code, 202)
+        return post.data["id"]
+
+    def _artifact_paths(self, codecurl_id, extension="mp4"):
+        return {
+            "final": self._downloads / f"{codecurl_id}.{extension}",
+            "log": self._logs / f"{codecurl_id}.txt",
+            "process_log": self._logs / f"{codecurl_id}.ffmpeg.txt",
+            "title_log": self._logs / f"{codecurl_id}.title.txt",
+            "staging": self._downloads / STAGING_DIR_NAME / codecurl_id,
+        }
+
+    def test_second_success_removes_first_file_staging_logs_and_upload(self):
+        set_test_runner(FakeCommandRunner(scripts=[{}, {}, {}, {}]))
+        with patch("videos.profiles.probe_duration", return_value=None):
+            first_id = self._post(
+                "https://example.com/same", OutputProfile.WHATSAPP_VIDEO
+            )
+            _wait_for_download(first_id)
+            first = self._artifact_paths(first_id)
+            self.assertTrue(first["final"].exists())
+            self.assertTrue(first["log"].exists())
+            self.assertTrue(first["process_log"].exists())
+
+            first["staging"].mkdir(parents=True)
+            (first["staging"] / "source.mp4").write_text("partial")
+            first["title_log"].write_text("First title")
+            first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
+
+            messages = []
+            sink = loguru_logger.add(messages.append, level="INFO")
+            self.addCleanup(loguru_logger.remove, sink)
+
+            second_id = self._post(
+                "https://example.com/same", OutputProfile.WHATSAPP_VIDEO
+            )
+            _wait_for_download(second_id)
+
+        self.assertFalse(
+            VideosUploaded.objects.filter(pk=first_upload.pk).exists()
+        )
+        self.assertFalse(CodecUrls.objects.filter(pk=first_id).exists())
+        for path in first.values():
+            self.assertFalse(path.exists(), path)
+
+        second = self._artifact_paths(second_id)
+        self.assertTrue(second["final"].exists())
+        self.assertTrue(second["log"].exists())
+        self.assertTrue(second["process_log"].exists())
+        self.assertTrue(
+            VideosUploaded.objects.filter(codecurl_id=second_id).exists()
+        )
+
+        events = [json.loads(m.record["message"]) for m in messages]
+        superseded = [
+            e for e in events if e.get("event") == "download_superseded"
+        ]
+        self.assertEqual(len(superseded), 1)
+        self.assertEqual(superseded[0]["superseded_requests"], 1)
+        self.assertEqual(superseded[0]["files_deleted"], 1)
+        self.assertEqual(superseded[0]["staging_dirs_deleted"], 1)
+        self.assertEqual(superseded[0]["logs_deleted"], 3)
+        self.assertEqual(superseded[0]["uploads_deleted"], 1)
+        self.assertEqual(superseded[0]["codecurls_deleted"], 1)
+
+    def test_superseded_event_has_request_id_and_truncated_url(self):
+        url = "https://example.com/watch?v=" + "x" * 200
+        set_test_runner(FakeCommandRunner(scripts=[{}, {}]))
+        messages = []
+        sink = loguru_logger.add(messages.append, level="INFO")
+        self.addCleanup(loguru_logger.remove, sink)
+
+        first_id = self._post(url)
+        _wait_for_download(first_id)
+        second_id = self._post(url)
+        _wait_for_download(second_id)
+
+        events = [json.loads(m.record["message"]) for m in messages]
+        superseded = [
+            e for e in events if e.get("event") == "download_superseded"
+        ]
+        self.assertEqual(len(superseded), 1)
+        self.assertTrue(superseded[0]["request_id"])
+        self.assertNotEqual(superseded[0]["request_id"], "unknown")
+        self.assertLessEqual(len(superseded[0]["url_preview"]), 53)
+        self.assertNotEqual(superseded[0]["url_preview"], url)
+
+    def test_failed_attempt_row_stays_as_history(self):
+        set_test_runner(
+            FakeCommandRunner(scripts=[{"fail": True, "error": "boom"}])
+        )
+        failed_id = self._post("https://example.com/same")
+        _wait_for_download(failed_id)
+        self.assertEqual(
+            CodecUrls.objects.get(pk=failed_id).status, StatusCodec.ERROR
+        )
+
+        messages = []
+        sink = loguru_logger.add(messages.append, level="INFO")
+        self.addCleanup(loguru_logger.remove, sink)
+
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        success_id = self._post("https://example.com/same")
+        _wait_for_download(success_id)
+
+        failed = CodecUrls.objects.get(pk=failed_id)
+        self.assertEqual(failed.status, StatusCodec.ERROR)
+        self.assertEqual(
+            CodecUrls.objects.get(pk=success_id).status, StatusCodec.SUCCESS
+        )
+
+        events = [json.loads(m.record["message"]) for m in messages]
+        superseded = [
+            e for e in events if e.get("event") == "download_superseded"
+        ]
+        self.assertEqual(len(superseded), 1)
+        self.assertEqual(superseded[0]["superseded_requests"], 1)
+        self.assertEqual(superseded[0]["codecurls_deleted"], 0)
+
+    def test_failed_second_download_leaves_first_servable(self):
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        first_id = self._post("https://example.com/same")
+        _wait_for_download(first_id)
+        first = self._artifact_paths(first_id)
+        first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
+
+        set_test_runner(
+            FakeCommandRunner(scripts=[{"fail": True, "error": "boom"}])
+        )
+        second_id = self._post("https://example.com/same")
+        _wait_for_download(second_id)
+
+        self.assertEqual(
+            CodecUrls.objects.get(pk=second_id).status, StatusCodec.ERROR
+        )
+        self.assertFalse(
+            VideosUploaded.objects.filter(codecurl_id=second_id).exists()
+        )
+        self.assertTrue(
+            VideosUploaded.objects.filter(pk=first_upload.pk).exists()
+        )
+        self.assertTrue(first["final"].exists())
+        self.assertTrue(first["log"].exists())
+
+        get = self.client.get(
+            f"/api/v1/yt/videos-uploaded/{first_upload.id}"
+        )
+        self.assertEqual(get.status_code, 200)
+        self.assertEqual(b"".join(get.streaming_content), b"fake")
+
+    def test_other_profile_and_url_are_untouched(self):
+        set_test_runner(FakeCommandRunner())
+        first_id = self._post("https://example.com/same")
+        _wait_for_download(first_id)
+        first = self._artifact_paths(first_id)
+        first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
+
+        with patch("videos.profiles.probe_duration", return_value=None):
+            other_profile_id = self._post(
+                "https://example.com/same", OutputProfile.WHATSAPP_VIDEO
+            )
+            _wait_for_download(other_profile_id)
+
+        other_url_id = self._post("https://example.com/other")
+        _wait_for_download(other_url_id)
+
+        self.assertTrue(
+            VideosUploaded.objects.filter(pk=first_upload.pk).exists()
+        )
+        self.assertTrue(first["final"].exists())
+        self.assertTrue(first["log"].exists())
+        self.assertTrue(
+            VideosUploaded.objects.filter(
+                codecurl_id=other_profile_id
+            ).exists()
+        )
+        self.assertTrue(
+            VideosUploaded.objects.filter(codecurl_id=other_url_id).exists()
+        )
+
+    def test_post_does_not_delete_previous_file_while_job_is_pending(self):
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        first_id = self._post("https://example.com/same")
+        _wait_for_download(first_id)
+        first = self._artifact_paths(first_id)
+        first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
+
+        class BlockingRunner(FakeCommandRunner):
+            def __init__(self):
+                super().__init__(scripts=[{"progress": [100.0]}])
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def run(self, *args, **kwargs):
+                self.entered.set()
+                self.release.wait(5)
+                return super().run(*args, **kwargs)
+
+        runner = BlockingRunner()
+        set_test_runner(runner)
+        second_id = self._post("https://example.com/same")
+        self.assertTrue(runner.entered.wait(5))
+        self.assertTrue(first["final"].exists())
+        self.assertTrue(
+            VideosUploaded.objects.filter(pk=first_upload.pk).exists()
+        )
+
+        runner.release.set()
+        _wait_for_download(second_id)
+
+        self.assertFalse(first["final"].exists())
+        self.assertFalse(
+            VideosUploaded.objects.filter(pk=first_upload.pk).exists()
+        )
+        self.assertTrue(
+            VideosUploaded.objects.filter(codecurl_id=second_id).exists()
+        )
+
+    def test_later_requests_are_not_superseded(self):
+        url = "https://example.com/same"
+        later = CodecUrls.objects.create(url=url)
+        later_file = self._downloads / f"{later.id}.mp4"
+        later_file.write_text("later")
+        later_log = self._logs / f"{later.id}.txt"
+        later_log.write_text("later log")
+        later_upload = VideosUploaded.objects.create(
+            file_path=str(later_file), codecurl=later
+        )
+        CodecUrls.objects.filter(pk=later.pk).update(
+            created_at=timezone.now() + timedelta(hours=1)
+        )
+
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        current_id = self._post(url)
+        _wait_for_download(current_id)
+
+        self.assertTrue(
+            VideosUploaded.objects.filter(pk=later_upload.pk).exists()
+        )
+        self.assertTrue(later_file.exists())
+        self.assertTrue(later_log.exists())
+        self.assertTrue(CodecUrls.objects.filter(pk=later.pk).exists())
+        self.assertTrue(
+            VideosUploaded.objects.filter(codecurl_id=current_id).exists()
+        )
+
+
+class RunningJobProtectionTests(DownloadJobTestCase):
+    """Supersession must leave jobs that are still running alone."""
+
+    URL = "https://example.com/same"
+
+    class GatedRunner(FakeCommandRunner):
+        """Block the first completed run so its job stays registered."""
+
+        def __init__(self, scripts=None):
+            super().__init__(scripts=scripts)
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self._gated = False
+
+        def run(self, *args, **kwargs):
+            result = super().run(*args, **kwargs)
+            if not self._gated:
+                self._gated = True
+                self.entered.set()
+                self.release.wait(5)
+            return result
+
+    def _post(self, profile=None):
+        payload = {"url": self.URL}
+        if profile:
+            payload["output_profile"] = profile
+        post = self.client.post(
+            "/api/v1/yt/videos-uploaded/", payload, format="json"
+        )
+        self.assertEqual(post.status_code, 202)
+        return post.data["id"]
+
+    def test_repeated_post_keeps_running_jobs_staging_and_output(self):
+        runner = self.GatedRunner(scripts=[{}, {}, {}, {}])
+        set_test_runner(runner)
+        with patch("videos.profiles.probe_duration", return_value=None):
+            first_id = self._post(OutputProfile.WHATSAPP_VIDEO)
+            self.assertTrue(runner.entered.wait(5))
+
+            staging = self._downloads / STAGING_DIR_NAME / first_id
+            log = self._logs / f"{first_id}.txt"
+            staged = [path for path in staging.iterdir()]
+            self.assertTrue(staged)
+            self.assertTrue(log.exists())
+
+            second_id = self._post(OutputProfile.WHATSAPP_VIDEO)
+            _wait_for_download(second_id)
+
+            self.assertTrue(staging.is_dir())
+            for path in staged:
+                self.assertTrue(path.exists(), path)
+            self.assertTrue(log.exists())
+
+            runner.release.set()
+            _wait_for_download(first_id)
+
+        first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
+        second_upload = VideosUploaded.objects.get(codecurl_id=second_id)
+        self.assertTrue(Path(first_upload.file_path).exists())
+        self.assertTrue(Path(second_upload.file_path).exists())
+        self.assertTrue((self._downloads / f"{second_id}.mp4").exists())
+
+    def test_finishing_job_keeps_artifacts_of_running_job(self):
+        runner = self.GatedRunner(scripts=[{}, {}])
+        set_test_runner(runner)
+        first_id = self._post()
+        self.assertTrue(runner.entered.wait(5))
+
+        first_final = self._downloads / f"{first_id}.mp4"
+        first_log = self._logs / f"{first_id}.txt"
+        self.assertTrue(first_final.exists())
+        self.assertTrue(first_log.exists())
+
+        second_id = self._post()
+        _wait_for_download(second_id)
+
+        self.assertTrue(first_final.exists())
+        self.assertTrue(first_log.exists())
+
+        runner.release.set()
+        _wait_for_download(first_id)
+
+        first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
+        self.assertTrue(Path(first_upload.file_path).exists())
+        self.assertTrue((self._downloads / f"{second_id}.mp4").exists())
+        self.assertTrue(
+            VideosUploaded.objects.filter(codecurl_id=second_id).exists()
         )
 
 
@@ -757,3 +1282,109 @@ class StaleJobTests(TestCase):
             url="https://example.com/b", status=StatusCodec.SUCCESS
         )
         self.assertEqual(list(stale_pending_jobs()), [stale])
+
+
+class CleanupDownloadsCommandTests(TestCase):
+    """Orphan Video subido rows and their owned files are cleaned via CLI."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._downloads = Path(self._tmp.name) / "downloads"
+        self._downloads.mkdir()
+        self._logs = Path(self._tmp.name) / "logs"
+        self._logs.mkdir()
+        self._override = override_settings(
+            DOWNLOADS_DIR=self._downloads,
+            DOWNLOAD_LOGS_DIR=self._logs,
+        )
+        self._override.enable()
+        self.addCleanup(self._override.disable)
+
+    def _run(self, request_id="test-run"):
+        out = StringIO()
+        call_command("cleanup_downloads", request_id=request_id, stdout=out)
+        return json.loads(out.getvalue())
+
+    def test_removes_orphan_row_and_file_but_keeps_owned_upload(self):
+        orphan_file = self._downloads / "orphan.mp4"
+        orphan_file.write_text("orphan")
+        orphan = VideosUploaded.objects.create(
+            file_path=str(orphan_file), codecurl=None
+        )
+
+        codecurl = CodecUrls.objects.create(
+            url="https://example.com/kept", status=StatusCodec.SUCCESS
+        )
+        kept_file = self._downloads / f"{codecurl.id}.mp4"
+        kept_file.write_text("kept")
+        kept = VideosUploaded.objects.create(
+            file_path=str(kept_file), codecurl=codecurl
+        )
+
+        messages = []
+        sink = loguru_logger.add(messages.append, level="INFO")
+        self.addCleanup(loguru_logger.remove, sink)
+
+        counts = self._run()
+
+        self.assertEqual(
+            counts,
+            {"files_deleted": 1, "uploads_deleted": 1},
+        )
+        self.assertFalse(VideosUploaded.objects.filter(pk=orphan.pk).exists())
+        self.assertFalse(orphan_file.exists())
+        self.assertTrue(VideosUploaded.objects.filter(pk=kept.pk).exists())
+        self.assertTrue(kept_file.exists())
+        self.assertTrue(self._downloads.is_dir())
+
+        events = [
+            json.loads(m.record["message"])
+            for m in messages
+            if "download_orphans_cleaned" in m.record["message"]
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["files_deleted"], 1)
+        self.assertEqual(events[0]["uploads_deleted"], 1)
+        self.assertEqual(events[0]["request_id"], "test-run")
+
+    def test_second_run_removes_nothing(self):
+        orphan_file = self._downloads / "orphan.mp4"
+        orphan_file.write_text("orphan")
+        VideosUploaded.objects.create(
+            file_path=str(orphan_file), codecurl=None
+        )
+
+        first = self._run()
+        second = self._run()
+
+        self.assertEqual(first["uploads_deleted"], 1)
+        self.assertEqual(second["files_deleted"], 0)
+        self.assertEqual(second["uploads_deleted"], 0)
+        self.assertEqual(VideosUploaded.objects.count(), 0)
+        self.assertTrue(self._downloads.is_dir())
+
+    def test_orphan_file_outside_downloads_root_is_kept(self):
+        outside = Path(self._tmp.name) / "outside.mp4"
+        outside.write_text("outside")
+        orphan = VideosUploaded.objects.create(
+            file_path=str(outside), codecurl=None
+        )
+
+        counts = self._run()
+
+        self.assertEqual(counts["files_deleted"], 0)
+        self.assertEqual(counts["uploads_deleted"], 1)
+        self.assertFalse(VideosUploaded.objects.filter(pk=orphan.pk).exists())
+        self.assertTrue(outside.exists())
+
+    def test_missing_orphan_file_is_tolerated(self):
+        orphan = VideosUploaded.objects.create(
+            file_path=str(self._downloads / "gone.mp4"), codecurl=None
+        )
+
+        counts = self._run()
+
+        self.assertEqual(counts["files_deleted"], 0)
+        self.assertEqual(counts["uploads_deleted"], 1)
+        self.assertFalse(VideosUploaded.objects.filter(pk=orphan.pk).exists())
