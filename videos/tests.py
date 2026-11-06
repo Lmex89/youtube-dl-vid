@@ -3,11 +3,13 @@ import tempfile
 import threading
 import time
 from datetime import timedelta
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 from loguru import logger as loguru_logger
 from django.core.cache import caches
+from django.core.management import call_command
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -906,7 +908,7 @@ class SupersedeOnSuccessTests(DownloadJobTestCase):
         self.assertFalse(
             VideosUploaded.objects.filter(pk=first_upload.pk).exists()
         )
-        self.assertTrue(CodecUrls.objects.filter(pk=first_id).exists())
+        self.assertFalse(CodecUrls.objects.filter(pk=first_id).exists())
         for path in first.values():
             self.assertFalse(path.exists(), path)
 
@@ -928,6 +930,39 @@ class SupersedeOnSuccessTests(DownloadJobTestCase):
         self.assertEqual(superseded[0]["staging_dirs_deleted"], 1)
         self.assertEqual(superseded[0]["logs_deleted"], 3)
         self.assertEqual(superseded[0]["uploads_deleted"], 1)
+        self.assertEqual(superseded[0]["codecurls_deleted"], 1)
+
+    def test_failed_attempt_row_stays_as_history(self):
+        set_test_runner(
+            FakeCommandRunner(scripts=[{"fail": True, "error": "boom"}])
+        )
+        failed_id = self._post("https://example.com/same")
+        _wait_for_download(failed_id)
+        self.assertEqual(
+            CodecUrls.objects.get(pk=failed_id).status, StatusCodec.ERROR
+        )
+
+        messages = []
+        sink = loguru_logger.add(messages.append, level="INFO")
+        self.addCleanup(loguru_logger.remove, sink)
+
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        success_id = self._post("https://example.com/same")
+        _wait_for_download(success_id)
+
+        failed = CodecUrls.objects.get(pk=failed_id)
+        self.assertEqual(failed.status, StatusCodec.ERROR)
+        self.assertEqual(
+            CodecUrls.objects.get(pk=success_id).status, StatusCodec.SUCCESS
+        )
+
+        events = [json.loads(m.record["message"]) for m in messages]
+        superseded = [
+            e for e in events if e.get("event") == "download_superseded"
+        ]
+        self.assertEqual(len(superseded), 1)
+        self.assertEqual(superseded[0]["superseded_requests"], 1)
+        self.assertEqual(superseded[0]["codecurls_deleted"], 0)
 
     def test_failed_second_download_leaves_first_servable(self):
         set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
@@ -1131,3 +1166,109 @@ class StaleJobTests(TestCase):
             url="https://example.com/b", status=StatusCodec.SUCCESS
         )
         self.assertEqual(list(stale_pending_jobs()), [stale])
+
+
+class CleanupDownloadsCommandTests(TestCase):
+    """Orphan Video subido rows and their owned files are cleaned via CLI."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._downloads = Path(self._tmp.name) / "downloads"
+        self._downloads.mkdir()
+        self._logs = Path(self._tmp.name) / "logs"
+        self._logs.mkdir()
+        self._override = override_settings(
+            DOWNLOADS_DIR=self._downloads,
+            DOWNLOAD_LOGS_DIR=self._logs,
+        )
+        self._override.enable()
+        self.addCleanup(self._override.disable)
+
+    def _run(self):
+        out = StringIO()
+        call_command("cleanup_downloads", stdout=out)
+        return json.loads(out.getvalue())
+
+    def test_removes_orphan_row_and_file_but_keeps_owned_upload(self):
+        orphan_file = self._downloads / "orphan.mp4"
+        orphan_file.write_text("orphan")
+        orphan = VideosUploaded.objects.create(
+            file_path=str(orphan_file), codecurl=None
+        )
+
+        codecurl = CodecUrls.objects.create(
+            url="https://example.com/kept", status=StatusCodec.SUCCESS
+        )
+        kept_file = self._downloads / f"{codecurl.id}.mp4"
+        kept_file.write_text("kept")
+        kept = VideosUploaded.objects.create(
+            file_path=str(kept_file), codecurl=codecurl
+        )
+
+        messages = []
+        sink = loguru_logger.add(messages.append, level="INFO")
+        self.addCleanup(loguru_logger.remove, sink)
+
+        counts = self._run()
+
+        self.assertEqual(
+            counts,
+            {"files_deleted": 1, "uploads_deleted": 1},
+        )
+        self.assertFalse(VideosUploaded.objects.filter(pk=orphan.pk).exists())
+        self.assertFalse(orphan_file.exists())
+        self.assertTrue(VideosUploaded.objects.filter(pk=kept.pk).exists())
+        self.assertTrue(kept_file.exists())
+        self.assertTrue(self._downloads.is_dir())
+
+        events = [
+            json.loads(m.record["message"])
+            for m in messages
+            if "download_orphans_cleaned" in m.record["message"]
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["files_deleted"], 1)
+        self.assertEqual(events[0]["uploads_deleted"], 1)
+        self.assertEqual(events[0]["request_id"], "cleanup_downloads")
+
+    def test_second_run_removes_nothing(self):
+        orphan_file = self._downloads / "orphan.mp4"
+        orphan_file.write_text("orphan")
+        VideosUploaded.objects.create(
+            file_path=str(orphan_file), codecurl=None
+        )
+
+        first = self._run()
+        second = self._run()
+
+        self.assertEqual(first["uploads_deleted"], 1)
+        self.assertEqual(second["files_deleted"], 0)
+        self.assertEqual(second["uploads_deleted"], 0)
+        self.assertEqual(VideosUploaded.objects.count(), 0)
+        self.assertTrue(self._downloads.is_dir())
+
+    def test_orphan_file_outside_downloads_root_is_kept(self):
+        outside = Path(self._tmp.name) / "outside.mp4"
+        outside.write_text("outside")
+        orphan = VideosUploaded.objects.create(
+            file_path=str(outside), codecurl=None
+        )
+
+        counts = self._run()
+
+        self.assertEqual(counts["files_deleted"], 0)
+        self.assertEqual(counts["uploads_deleted"], 1)
+        self.assertFalse(VideosUploaded.objects.filter(pk=orphan.pk).exists())
+        self.assertTrue(outside.exists())
+
+    def test_missing_orphan_file_is_tolerated(self):
+        orphan = VideosUploaded.objects.create(
+            file_path=str(self._downloads / "gone.mp4"), codecurl=None
+        )
+
+        counts = self._run()
+
+        self.assertEqual(counts["files_deleted"], 0)
+        self.assertEqual(counts["uploads_deleted"], 1)
+        self.assertFalse(VideosUploaded.objects.filter(pk=orphan.pk).exists())

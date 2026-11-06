@@ -10,7 +10,7 @@ from typing import Optional
 from django.conf import settings
 from loguru import logger
 
-from videos.models import CodecUrls, VideosUploaded
+from videos.models import CodecUrls, StatusCodec, VideosUploaded
 from videos.profiles import get_profile
 
 STAGING_DIR_NAME = ".tmp"
@@ -151,7 +151,8 @@ class DownloadStorage:
         """Make *codecurl* replace earlier jobs for its URL and profile.
 
         Removes the superseded Video subido rows and their final files, staging
-        directories and logs. Solicitud de descarga rows are kept as history.
+        directories and logs. Superseded successful Solicitud de descarga rows
+        are deleted with their artifacts; failed attempts stay as history.
         """
         superseded = self._superseded_ids(codecurl)
         counts = {
@@ -160,12 +161,14 @@ class DownloadStorage:
             "staging_dirs_deleted": 0,
             "logs_deleted": 0,
             "uploads_deleted": 0,
+            "codecurls_deleted": 0,
         }
         if not superseded:
             return counts
 
         profile = get_profile(codecurl.output_profile)
         for old_id in superseded:
+            old_codecurl = CodecUrls.objects.filter(pk=old_id).first()
             paths = self.job_paths(str(old_id), profile)
 
             uploads = list(
@@ -178,6 +181,10 @@ class DownloadStorage:
                 codecurl_id=old_id
             ).delete()
             counts["uploads_deleted"] += deleted
+
+            if old_codecurl and old_codecurl.status == StatusCodec.SUCCESS:
+                old_codecurl.delete()
+                counts["codecurls_deleted"] += 1
 
             if self._delete_file(paths.final):
                 counts["files_deleted"] += 1
@@ -197,6 +204,29 @@ class DownloadStorage:
                 "codecurl_id": str(codecurl.id),
                 "url_preview": _preview(codecurl.url),
                 "output_profile": codecurl.output_profile,
+                **counts,
+                "request_id": request_id,
+            })
+        )
+        return counts
+
+    def cleanup_orphans(self, request_id: str = "unknown") -> dict:
+        """Delete Video subido rows without a Solicitud de descarga.
+
+        Removes each row and its file only when the file lives under the
+        downloads root; never removes the root itself. Missing files are fine.
+        """
+        counts = {"files_deleted": 0, "uploads_deleted": 0}
+        orphans = list(VideosUploaded.objects.filter(codecurl__isnull=True))
+        for upload in orphans:
+            if self._delete_owned_file(upload.file_path):
+                counts["files_deleted"] += 1
+            upload.delete()
+            counts["uploads_deleted"] += 1
+
+        logger.info(
+            json.dumps({
+                "event": "download_orphans_cleaned",
                 **counts,
                 "request_id": request_id,
             })
