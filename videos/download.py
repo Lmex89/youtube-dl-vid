@@ -107,7 +107,7 @@ def start_download_async(codecurl: CodecUrls, request_id: str = "unknown") -> Co
 
 def _async_download_worker(codecurl_id: str, request_id: str) -> None:
     close_old_connections()
-    storage = DownloadStorage()
+    storage = DownloadStorage(is_running=is_download_running)
     runner = get_command_runner()
 
     save_progress = ProgressSaver(codecurl_id)
@@ -182,9 +182,9 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
         codecurl.save(update_fields=["status", "progress", "updated_at"])
 
         try:
-            storage.commit(codecurl, request_id=request_id)
+            storage.supersede_earlier(codecurl, request_id=request_id)
         except Exception as exc:
-            logger.error(
+            logger.exception(
                 json.dumps({
                     "event": "download_supersede_failed",
                     "codecurl_id": codecurl_id,

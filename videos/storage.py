@@ -6,7 +6,7 @@ import mimetypes
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from django.conf import settings
 
@@ -47,7 +47,10 @@ class DownloadStorage:
         self,
         downloads_dir: Optional[Path] = None,
         logs_dir: Optional[Path] = None,
+        is_running: Callable[[str], bool] = lambda codecurl_id: False,
     ):
+        # Injected to avoid importing videos.download (circular dependency).
+        self._is_running = is_running
         self.downloads_dir = Path(
             downloads_dir
             if downloads_dir is not None
@@ -104,8 +107,11 @@ class DownloadStorage:
             exists=bool(path and path.exists()),
         )
 
-    def discard_staging(self, codecurl_id: str) -> None:
-        """Remove one job's staging directory; never the staging root."""
+    def discard_staging(self, codecurl_id: str) -> bool:
+        """Remove one job's staging directory; never the staging root.
+
+        Returns True when a directory was actually removed.
+        """
         codecurl_id = str(codecurl_id)
         staging_dir = self.staging_root / codecurl_id
         if (
@@ -114,14 +120,19 @@ class DownloadStorage:
             and staging_dir.parent == self.staging_root
             and not self.staging_root.is_symlink()
             and not staging_dir.is_symlink()
+            and staging_dir.is_dir()
         ):
             shutil.rmtree(staging_dir, ignore_errors=True)
+            return True
+        return False
 
-    @staticmethod
-    def _superseded_ids(codecurl) -> list:
-        # Lazy import: videos.download imports storage at module scope.
-        from videos.download import is_download_running
+    def _superseded_ids(self, codecurl) -> list:
+        """Earlier jobs for the same URL and profile that are not running.
 
+        shortcut: running state is per-process (thread registry), so a job
+        running in another gunicorn worker is not protected; upgrade by
+        persisting a heartbeat if multi-worker races show up.
+        """
         earlier = (
             CodecUrls.objects.filter(
                 url=codecurl.url,
@@ -132,9 +143,7 @@ class DownloadStorage:
             .values_list("id", flat=True)
         )
         return [
-            old_id
-            for old_id in earlier
-            if not is_download_running(str(old_id))
+            old_id for old_id in earlier if not self._is_running(str(old_id))
         ]
 
     @staticmethod
@@ -157,7 +166,7 @@ class DownloadStorage:
             return False
         return self._delete_file(path)
 
-    def commit(self, codecurl, request_id: str = "unknown") -> dict:
+    def supersede_earlier(self, codecurl, request_id: str = "unknown") -> dict:
         """Make *codecurl* replace earlier jobs for its URL and profile.
 
         Removes the superseded Video subido rows and their final files, staging
@@ -181,27 +190,20 @@ class DownloadStorage:
             old_codecurl = CodecUrls.objects.filter(pk=old_id).first()
             paths = self.job_paths(str(old_id), profile)
 
-            uploads = list(
-                VideosUploaded.objects.filter(codecurl_id=old_id)
-            )
-            for upload in uploads:
+            for upload in VideosUploaded.objects.filter(codecurl_id=old_id):
                 if self._delete_owned_file(upload.file_path):
                     counts["files_deleted"] += 1
-            deleted, _ = VideosUploaded.objects.filter(
-                codecurl_id=old_id
-            ).delete()
-            counts["uploads_deleted"] += deleted
+                upload.delete()
+                counts["uploads_deleted"] += 1
 
             if old_codecurl and old_codecurl.status == StatusCodec.SUCCESS:
-                deleted, _ = old_codecurl.delete()
-                counts["codecurls_deleted"] += deleted
+                old_codecurl.delete()
+                counts["codecurls_deleted"] += 1
 
             if self._delete_file(paths.final):
                 counts["files_deleted"] += 1
 
-            staging = self.staging_root / str(old_id)
-            if staging.is_dir() and not staging.is_symlink():
-                self.discard_staging(str(old_id))
+            if self.discard_staging(str(old_id)):
                 counts["staging_dirs_deleted"] += 1
 
             for log_path in (paths.log, paths.process_log, paths.title_log):

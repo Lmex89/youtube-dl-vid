@@ -235,7 +235,7 @@ class VideosUploadedDetailAPIView(generics.RetrieveAPIView):
                 "request_id": request_id,
             }
             if served.path is not None:
-                details["file_path"] = str(served.path)
+                details["file_path"] = served.path.name
             logger.warning(json.dumps(details))
             return Response(
                 data={"error": "file not found"},
