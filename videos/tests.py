@@ -19,6 +19,7 @@ from videos.download import (
 from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
 from videos.profiles import PROFILES, get_profile
 from videos.runner import FakeCommandRunner, set_test_runner
+from videos.storage import STAGING_DIR_NAME, DownloadStorage
 
 
 class ProfileRegistryTests(TestCase):
@@ -113,6 +114,74 @@ class BuildCommandTests(TestCase):
     def test_whatsapp_target_bitrate_without_duration(self):
         profile = get_profile(OutputProfile.WHATSAPP_VIDEO)
         self.assertIsNone(profile._target_video_kbps(None, 128, 1024))
+
+
+class DownloadStorageTests(TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.downloads = root / "downloads"
+        self.logs = root / "logs"
+        self.storage = DownloadStorage(
+            downloads_dir=self.downloads, logs_dir=self.logs
+        )
+        self.codecurl_id = "1234abcd-0000-0000-0000-000000000000"
+
+    def test_job_paths_place_final_staging_and_logs_under_injected_roots(self):
+        profile = get_profile(OutputProfile.WHATSAPP_VIDEO)
+
+        paths = self.storage.job_paths(self.codecurl_id, profile)
+
+        self.assertEqual(
+            paths.final, self.downloads / f"{self.codecurl_id}.mp4"
+        )
+        self.assertEqual(
+            paths.workdir,
+            self.downloads / STAGING_DIR_NAME / self.codecurl_id,
+        )
+        self.assertEqual(paths.log, self.logs / f"{self.codecurl_id}.txt")
+        self.assertEqual(
+            paths.process_log, self.logs / f"{self.codecurl_id}.ffmpeg.txt"
+        )
+        self.assertEqual(
+            paths.title_log, self.logs / f"{self.codecurl_id}.title.txt"
+        )
+
+    def test_standard_profile_works_in_downloads_root(self):
+        profile = get_profile(OutputProfile.STANDARD_VIDEO)
+
+        paths = self.storage.job_paths(self.codecurl_id, profile)
+
+        self.assertEqual(paths.workdir, self.downloads)
+        self.assertEqual(
+            paths.final, self.downloads / f"{self.codecurl_id}.mp4"
+        )
+
+    def test_discard_staging_removes_only_that_job_and_keeps_root(self):
+        job = self.downloads / STAGING_DIR_NAME / self.codecurl_id
+        other = self.downloads / STAGING_DIR_NAME / "another-job"
+        job.mkdir(parents=True)
+        (job / "partial.mp4").write_text("partial")
+        other.mkdir(parents=True)
+        keep = self.downloads / "keep.txt"
+        keep.write_text("keep")
+
+        self.storage.discard_staging(self.codecurl_id)
+        self.storage.discard_staging(self.codecurl_id)
+
+        self.assertFalse(job.exists())
+        self.assertTrue(other.exists())
+        self.assertTrue((self.downloads / STAGING_DIR_NAME).exists())
+        self.assertTrue(keep.exists())
+
+    def test_discard_staging_never_removes_the_staging_root(self):
+        self.downloads.mkdir(parents=True)
+
+        self.storage.discard_staging("..")
+        self.storage.discard_staging("")
+
+        self.assertTrue(self.downloads.exists())
 
 
 class VideosUploadedPostTests(TestCase):
@@ -378,6 +447,64 @@ class StandardVideoEndToEndTests(DownloadJobTestCase):
         self.assertEqual(get.status_code, 200)
         self.assertEqual(get.data["status"], StatusCodec.ERROR)
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
+
+
+class StorageLayoutEndToEndTests(DownloadJobTestCase):
+    """HTTP jobs keep final files and logs under the injected roots."""
+
+    def test_standard_success_uses_storage_layout(self):
+        runner = FakeCommandRunner(scripts=[{"progress": [100.0]}])
+        set_test_runner(runner)
+
+        post = self.client.post(
+            "/api/v1/yt/videos-uploaded/",
+            {"url": "https://example.com/video"},
+            format="json",
+        )
+        codecurl_id = post.data["id"]
+        _wait_for_download(codecurl_id)
+
+        upload = VideosUploaded.objects.get(codecurl_id=codecurl_id)
+        self.assertEqual(
+            upload.file_path, str(self._downloads / f"{codecurl_id}.mp4")
+        )
+        self.assertTrue((self._downloads / f"{codecurl_id}.mp4").exists())
+        self.assertTrue((self._logs / f"{codecurl_id}.txt").exists())
+        self.assertFalse(
+            (self._downloads / STAGING_DIR_NAME / codecurl_id).exists()
+        )
+
+        get = self.client.get(f"/api/v1/yt/videos-uploaded/{upload.id}")
+        self.assertEqual(get.status_code, 200)
+        b"".join(get.streaming_content)
+
+    def test_whatsapp_success_uses_storage_layout_for_process_log(self):
+        runner = FakeCommandRunner(
+            scripts=[{"progress": [100.0]}, {"progress": [100.0]}]
+        )
+        set_test_runner(runner)
+
+        with patch("videos.profiles.probe_duration", return_value=None):
+            post = self.client.post(
+                "/api/v1/yt/videos-uploaded/",
+                {
+                    "url": "https://example.com/video",
+                    "output_profile": OutputProfile.WHATSAPP_VIDEO,
+                },
+                format="json",
+            )
+        codecurl_id = post.data["id"]
+        _wait_for_download(codecurl_id)
+
+        upload = VideosUploaded.objects.get(codecurl_id=codecurl_id)
+        self.assertEqual(
+            upload.file_path, str(self._downloads / f"{codecurl_id}.mp4")
+        )
+        self.assertTrue((self._logs / f"{codecurl_id}.txt").exists())
+        self.assertTrue((self._logs / f"{codecurl_id}.ffmpeg.txt").exists())
+        self.assertFalse(
+            (self._downloads / STAGING_DIR_NAME / codecurl_id).exists()
+        )
 
 
 class RecordingRunner(FakeCommandRunner):

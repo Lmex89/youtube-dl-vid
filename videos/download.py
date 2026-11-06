@@ -1,5 +1,4 @@
 import json
-import shutil
 import threading
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -13,8 +12,7 @@ from videos.models import CodecUrls, StatusCodec, VideosUploaded
 from videos.process import parse_yt_dlp_progress, run_process
 from videos.profiles import get_profile
 from videos.runner import CommandRunner, get_command_runner
-
-TMP_DIR_NAME = ".tmp"
+from videos.storage import DownloadStorage
 
 URL_PREVIEW_LEN = 50
 
@@ -115,10 +113,7 @@ def start_download_async(codecurl: CodecUrls, request_id: str = "unknown") -> Co
 
 def _async_download_worker(codecurl_id: str, request_id: str) -> None:
     close_old_connections()
-    downloads_dir = Path(settings.DOWNLOADS_DIR)
-    staging_root = downloads_dir / TMP_DIR_NAME
-    staging_dir = staging_root / codecurl_id
-    workdir: Optional[Path] = None
+    storage = DownloadStorage()
     runner = get_command_runner()
 
     save_progress = ProgressSaver(codecurl_id)
@@ -126,15 +121,13 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
     try:
         codecurl = CodecUrls.objects.get(pk=codecurl_id)
         profile = get_profile(codecurl.output_profile)
+        paths = storage.job_paths(codecurl_id, profile)
 
-        destination = downloads_dir / f"{codecurl.id}.{profile.extension}"
-        log_path = Path(settings.DOWNLOAD_LOGS_DIR) / f"{codecurl.id}.txt"
-
+        destination = paths.final
+        log_path = paths.log
+        workdir = paths.workdir
         if profile.uses_temporary_files:
-            workdir = staging_dir
             workdir.mkdir(parents=True, exist_ok=True)
-        else:
-            workdir = downloads_dir
 
         download_weight = profile.download_weight
 
@@ -155,7 +148,7 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
             })
         )
 
-        title_path = Path(settings.DOWNLOAD_LOGS_DIR) / f"{codecurl.id}.title.txt"
+        title_path = paths.title_log
         title_path.unlink(missing_ok=True)
         command = profile.build_command(codecurl.url, destination, workdir)
         command += ["--print-to-file", "%(title)s", str(title_path)]
@@ -168,14 +161,10 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
 
         source = profile.locate_source(workdir, destination)
         if profile.uses_temporary_files:
-            process_log = (
-                Path(settings.DOWNLOAD_LOGS_DIR)
-                / f"{codecurl.id}.ffmpeg.txt"
-            )
             profile.post_process(
                 source,
                 destination,
-                process_log,
+                paths.process_log,
                 on_process_progress,
                 runner=runner,
             )
@@ -222,14 +211,7 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
             codecurl.status = StatusCodec.ERROR
             codecurl.save(update_fields=["status", "updated_at"])
     finally:
-        if (
-            codecurl_id not in {".", ".."}
-            and Path(codecurl_id).name == codecurl_id
-            and staging_dir.parent == staging_root
-            and not staging_root.is_symlink()
-            and not staging_dir.is_symlink()
-        ):
-            shutil.rmtree(staging_dir, ignore_errors=True)
+        storage.discard_staging(codecurl_id)
         with _threads_lock:
             _download_threads.pop(codecurl_id, None)
         close_old_connections()
@@ -261,9 +243,9 @@ def cleanup_old_downloads(current_codecurl: CodecUrls) -> None:
             deleted_count += 1
             logger.debug(f"Deleted old media file: {upload.file_path}")
 
-    tmp_root = Path(settings.DOWNLOADS_DIR) / TMP_DIR_NAME
+    storage = DownloadStorage()
     for old_codecurl in old_urls:
-        shutil.rmtree(tmp_root / str(old_codecurl.id), ignore_errors=True)
+        storage.discard_staging(str(old_codecurl.id))
 
     old_uploads.delete()
 
