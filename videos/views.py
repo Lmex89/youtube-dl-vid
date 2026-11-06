@@ -223,15 +223,20 @@ class VideosUploadedDetailAPIView(generics.RetrieveAPIView):
         request_id = getattr(request, "request_id", "unknown")
         served = DownloadStorage().resolve(upload)
 
-        if served.path is None:
-            logger.warning(
-                json.dumps({
-                    "event": "video_file_not_found",
-                    "upload_id": str(upload.id),
-                    "reason": "empty_file_path",
-                    "request_id": request_id,
-                })
-            )
+        if served.path is None or not served.exists:
+            details = {
+                "event": "video_file_not_found",
+                "upload_id": str(upload.id),
+                "reason": (
+                    "empty_file_path"
+                    if served.path is None
+                    else "file_not_found"
+                ),
+                "request_id": request_id,
+            }
+            if served.path is not None:
+                details["file_path"] = str(served.path)
+            logger.warning(json.dumps(details))
             return Response(
                 data={"error": "file not found"},
                 status=status.HTTP_404_NOT_FOUND,
@@ -246,20 +251,6 @@ class VideosUploadedDetailAPIView(generics.RetrieveAPIView):
                 "request_id": request_id,
             })
         )
-
-        if not served.exists:
-            logger.warning(
-                json.dumps({
-                    "event": "video_file_not_found",
-                    "upload_id": str(upload.id),
-                    "file_path": str(served.path),
-                    "request_id": request_id,
-                })
-            )
-            return Response(
-                data={"error": "file not found"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
 
         logger.info(
             json.dumps({

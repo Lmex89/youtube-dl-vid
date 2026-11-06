@@ -68,7 +68,7 @@ class BuildCommandTests(TestCase):
         command = get_profile(OutputProfile.WHATSAPP_VIDEO).build_command(
             "https://example.com/video",
             Path("/tmp/downloads/video.mp4"),
-            Path("/tmp/downloads/.tmp"),
+            Path("/tmp/downloads") / STAGING_DIR_NAME,
         )
         output_template = command[command.index("-o") + 1]
         self.assertTrue(output_template.endswith("source.%(ext)s"))
@@ -78,7 +78,7 @@ class BuildCommandTests(TestCase):
         command = get_profile(OutputProfile.AUDIO_M4A).build_command(
             "https://example.com/video",
             Path("/tmp/downloads/audio.m4a"),
-            Path("/tmp/downloads/.tmp"),
+            Path("/tmp/downloads") / STAGING_DIR_NAME,
         )
         self.assertIn("-x", command)
         self.assertEqual(command[command.index("--audio-format") + 1], "m4a")
@@ -722,7 +722,7 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
         self.assertEqual(get.data["status"], StatusCodec.ERROR)
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
         self.assertFalse(
-            (self._downloads / ".tmp" / str(codecurl_id)).exists()
+            (self._downloads / STAGING_DIR_NAME / str(codecurl_id)).exists()
         )
 
     def test_success_removes_staging_over_http(self):
@@ -751,7 +751,7 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
         self.assertEqual(get.data["status"], StatusCodec.SUCCESS)
         self.assertTrue(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
         self.assertFalse(
-            (self._downloads / ".tmp" / str(codecurl_id)).exists()
+            (self._downloads / STAGING_DIR_NAME / str(codecurl_id)).exists()
         )
         self.assertTrue(sentinel.exists())
 
@@ -784,7 +784,7 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
         self.assertEqual(get.data["status"], StatusCodec.ERROR)
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
         self.assertFalse(
-            (self._downloads / ".tmp" / str(codecurl_id)).exists()
+            (self._downloads / STAGING_DIR_NAME / str(codecurl_id)).exists()
         )
         self.assertTrue(sentinel.exists())
 
@@ -810,7 +810,7 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
         self.assertEqual(get.data["status"], StatusCodec.ERROR)
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
         self.assertFalse(
-            (self._downloads / ".tmp" / str(codecurl_id)).exists()
+            (self._downloads / STAGING_DIR_NAME / str(codecurl_id)).exists()
         )
 
     def test_missing_request_is_logged_and_staging_is_removed(self):
@@ -820,8 +820,12 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
             def run(self, command, log_path, label, timeout, *a, **kw):
                 if "-o" in command:
                     cid = Path(command[command.index("-o") + 1]).parent.name
-                    (downloads / ".tmp" / cid).mkdir(parents=True, exist_ok=True)
-                    (downloads / ".tmp" / cid / "partial").write_text("partial")
+                    (downloads / STAGING_DIR_NAME / cid).mkdir(
+                        parents=True, exist_ok=True
+                    )
+                    (downloads / STAGING_DIR_NAME / cid / "partial").write_text(
+                        "partial"
+                    )
                     CodecUrls.objects.filter(pk=cid).delete()
                 return super().run(command, log_path, label, timeout, *a, **kw)
 
@@ -844,7 +848,7 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
         _wait_for_download(codecurl_id)
         self.assertFalse(CodecUrls.objects.filter(pk=codecurl_id).exists())
         self.assertFalse(
-            (self._downloads / ".tmp" / str(codecurl_id)).exists()
+            (self._downloads / STAGING_DIR_NAME / str(codecurl_id)).exists()
         )
         self.assertTrue(self._downloads.exists())
         events = [json.loads(m.record["message"]) for m in messages]
@@ -931,6 +935,28 @@ class SupersedeOnSuccessTests(DownloadJobTestCase):
         self.assertEqual(superseded[0]["logs_deleted"], 3)
         self.assertEqual(superseded[0]["uploads_deleted"], 1)
         self.assertEqual(superseded[0]["codecurls_deleted"], 1)
+
+    def test_superseded_event_has_request_id_and_truncated_url(self):
+        url = "https://example.com/watch?v=" + "x" * 200
+        set_test_runner(FakeCommandRunner(scripts=[{}, {}]))
+        messages = []
+        sink = loguru_logger.add(messages.append, level="INFO")
+        self.addCleanup(loguru_logger.remove, sink)
+
+        first_id = self._post(url)
+        _wait_for_download(first_id)
+        second_id = self._post(url)
+        _wait_for_download(second_id)
+
+        events = [json.loads(m.record["message"]) for m in messages]
+        superseded = [
+            e for e in events if e.get("event") == "download_superseded"
+        ]
+        self.assertEqual(len(superseded), 1)
+        self.assertTrue(superseded[0]["request_id"])
+        self.assertNotEqual(superseded[0]["request_id"], "unknown")
+        self.assertLessEqual(len(superseded[0]["url_preview"]), 53)
+        self.assertNotEqual(superseded[0]["url_preview"], url)
 
     def test_failed_attempt_row_stays_as_history(self):
         set_test_runner(
@@ -1275,9 +1301,9 @@ class CleanupDownloadsCommandTests(TestCase):
         self._override.enable()
         self.addCleanup(self._override.disable)
 
-    def _run(self):
+    def _run(self, request_id="test-run"):
         out = StringIO()
-        call_command("cleanup_downloads", stdout=out)
+        call_command("cleanup_downloads", request_id=request_id, stdout=out)
         return json.loads(out.getvalue())
 
     def test_removes_orphan_row_and_file_but_keeps_owned_upload(self):
@@ -1320,7 +1346,7 @@ class CleanupDownloadsCommandTests(TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["files_deleted"], 1)
         self.assertEqual(events[0]["uploads_deleted"], 1)
-        self.assertEqual(events[0]["request_id"], "cleanup_downloads")
+        self.assertEqual(events[0]["request_id"], "test-run")
 
     def test_second_run_removes_nothing(self):
         orphan_file = self._downloads / "orphan.mp4"

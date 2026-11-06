@@ -12,16 +12,10 @@ from videos.models import CodecUrls, StatusCodec, VideosUploaded
 from videos.process import parse_yt_dlp_progress, run_process
 from videos.profiles import get_profile
 from videos.runner import CommandRunner, get_command_runner
-from videos.storage import DownloadStorage
-
-URL_PREVIEW_LEN = 50
+from videos.storage import DownloadStorage, preview_url
 
 _download_threads: dict = {}
 _threads_lock = threading.Lock()
-
-
-def _preview(url: str) -> str:
-    return url[:URL_PREVIEW_LEN] + ("..." if len(url) > URL_PREVIEW_LEN else "")
 
 
 def stale_pending_jobs():
@@ -143,7 +137,7 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
                 "event": "download_pipeline_started",
                 "codecurl_id": codecurl_id,
                 "output_profile": profile.name,
-                "url_preview": _preview(codecurl.url),
+                "url_preview": preview_url(codecurl.url),
                 "request_id": request_id,
             })
         )
