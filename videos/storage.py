@@ -1,11 +1,14 @@
 """Single owner of the physical layout of download artifacts."""
 
+import mimetypes
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from django.conf import settings
+
+from videos.profiles import get_profile
 
 STAGING_DIR_NAME = ".tmp"
 
@@ -17,6 +20,14 @@ class JobPaths:
     log: Path
     process_log: Path
     title_log: Path
+
+
+@dataclass(frozen=True)
+class ServedFile:
+    path: Optional[Path]
+    mime_type: str
+    filename: str
+    exists: bool
 
 
 class DownloadStorage:
@@ -53,6 +64,34 @@ class DownloadStorage:
             log=self.logs_dir / f"{codecurl_id}.txt",
             process_log=self.logs_dir / f"{codecurl_id}.ffmpeg.txt",
             title_log=self.logs_dir / f"{codecurl_id}.title.txt",
+        )
+
+    def resolve(self, upload) -> ServedFile:
+        """Describe the servable file for a Video subido."""
+        path = Path(upload.file_path) if upload.file_path else None
+        profile = None
+        if upload.codecurl_id:
+            try:
+                profile = get_profile(upload.codecurl.output_profile)
+            except ValueError:
+                profile = None
+
+        extension = (
+            profile.extension
+            if profile
+            else (path.suffix[1:] if path else "")
+        )
+        mime_type = (
+            (profile.mime_type if profile else "")
+            or upload.mime_type
+            or (mimetypes.guess_type(path.name)[0] if path else "")
+            or "application/octet-stream"
+        )
+        return ServedFile(
+            path=path,
+            mime_type=mime_type,
+            filename=f"{upload.id}.{extension}" if extension else str(upload.id),
+            exists=bool(path and path.exists()),
         )
 
     def discard_staging(self, codecurl_id: str) -> None:
