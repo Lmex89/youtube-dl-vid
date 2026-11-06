@@ -1,7 +1,5 @@
 import json
 import logging
-import mimetypes
-from pathlib import Path
 
 from django.http import FileResponse, JsonResponse
 from django.utils.decorators import method_decorator
@@ -17,6 +15,7 @@ from videos.serializers import (
     CodecUrlsSerializer,
     VideosUpladedSerializer,
 )
+from videos.storage import DownloadStorage
 
 logger = logging.getLogger("videos")
 
@@ -222,8 +221,9 @@ class VideosUploadedDetailAPIView(generics.RetrieveAPIView):
     def get(self, request, *args, **kwargs):
         upload = self.get_object()
         request_id = getattr(request, "request_id", "unknown")
+        served = DownloadStorage().resolve(upload)
 
-        if not upload.file_path:
+        if served.path is None:
             logger.warning(
                 json.dumps({
                     "event": "video_file_not_found",
@@ -237,24 +237,22 @@ class VideosUploadedDetailAPIView(generics.RetrieveAPIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        file_path = Path(upload.file_path)
-
         logger.debug(
             json.dumps({
                 "event": "video_file_download_requested",
                 "upload_id": str(upload.id),
-                "file_path": str(file_path),
+                "file_path": str(served.path),
                 "user": getattr(request.user, "username", "anonymous"),
                 "request_id": request_id,
             })
         )
 
-        if not file_path.exists():
+        if not served.exists:
             logger.warning(
                 json.dumps({
                     "event": "video_file_not_found",
                     "upload_id": str(upload.id),
-                    "file_path": str(file_path),
+                    "file_path": str(served.path),
                     "request_id": request_id,
                 })
             )
@@ -263,27 +261,20 @@ class VideosUploadedDetailAPIView(generics.RetrieveAPIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        content_type = (
-            upload.mime_type
-            or mimetypes.guess_type(file_path.name)[0]
-            or "application/octet-stream"
-        )
-
         logger.info(
             json.dumps({
                 "event": "video_file_streaming",
                 "upload_id": str(upload.id),
-                "filename": file_path.name,
-                "mime_type": content_type,
-                "size_bytes": file_path.stat().st_size,
+                "filename": served.path.name,
+                "mime_type": served.mime_type,
+                "size_bytes": served.path.stat().st_size,
                 "request_id": request_id,
             })
         )
 
-        response = FileResponse(
-            open(file_path, "rb"),
+        return FileResponse(
+            open(served.path, "rb"),
             as_attachment=True,
-            filename=f"{upload.id}{file_path.suffix}",
-            content_type=content_type,
+            filename=served.filename,
+            content_type=served.mime_type,
         )
-        return response

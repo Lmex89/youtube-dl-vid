@@ -277,39 +277,118 @@ class VideosUploadedFileTests(TestCase):
     def setUp(self):
         caches["ratelimit"].clear()
         self.client = APIClient()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.downloads = Path(self._tmp.name) / "downloads"
+        self.downloads.mkdir()
+        self._settings = override_settings(DOWNLOADS_DIR=self.downloads)
+        self._settings.enable()
+        self.addCleanup(self._settings.disable)
 
-    def test_download_uses_profile_mime_and_extension(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            file_path = Path(tmp) / "audio.m4a"
-            file_path.write_bytes(b"audio-bytes")
-            codecurl = CodecUrls.objects.create(
-                url="https://example.com/v",
-                output_profile=OutputProfile.AUDIO_M4A,
-            )
-            upload = VideosUploaded.objects.create(
-                file_path=str(file_path),
-                mime_type="audio/mp4",
-                codecurl=codecurl,
-            )
+    def _upload_with_file(
+        self, profile, content=b"media-bytes", mime_type=""
+    ):
+        codecurl = CodecUrls.objects.create(
+            url="https://example.com/v", output_profile=profile
+        )
+        path = self.downloads / f"{codecurl.id}.{get_profile(profile).extension}"
+        path.write_bytes(content)
+        return VideosUploaded.objects.create(
+            file_path=str(path), mime_type=mime_type, codecurl=codecurl
+        )
 
-            response = self.client.get(
-                f"/api/v1/yt/videos-uploaded/{upload.id}"
-            )
+    def test_standard_video_served_with_profile_mime_and_extension(self):
+        upload = self._upload_with_file(
+            OutputProfile.STANDARD_VIDEO, mime_type="application/octet-stream"
+        )
 
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response["Content-Type"], "audio/mp4")
-            self.assertIn(f"{upload.id}.m4a", response["Content-Disposition"])
-            b"".join(response.streaming_content)
+        response = self.client.get(
+            f"/api/v1/yt/videos-uploaded/{upload.id}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "video/mp4")
+        self.assertIn(f"{upload.id}.mp4", response["Content-Disposition"])
+        self.assertEqual(
+            b"".join(response.streaming_content), b"media-bytes"
+        )
+
+    def test_whatsapp_video_served_with_profile_mime_and_extension(self):
+        upload = self._upload_with_file(
+            OutputProfile.WHATSAPP_VIDEO, mime_type="video/quicktime"
+        )
+
+        response = self.client.get(
+            f"/api/v1/yt/videos-uploaded/{upload.id}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "video/mp4")
+        self.assertIn(f"{upload.id}.mp4", response["Content-Disposition"])
+        self.assertEqual(
+            b"".join(response.streaming_content), b"media-bytes"
+        )
+
+    def test_audio_m4a_served_with_profile_mime_and_extension(self):
+        upload = self._upload_with_file(
+            OutputProfile.AUDIO_M4A, content=b"audio-bytes"
+        )
+
+        response = self.client.get(
+            f"/api/v1/yt/videos-uploaded/{upload.id}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "audio/mp4")
+        self.assertIn(f"{upload.id}.m4a", response["Content-Disposition"])
+        self.assertEqual(
+            b"".join(response.streaming_content), b"audio-bytes"
+        )
 
     def test_download_returns_404_when_file_missing(self):
         codecurl = CodecUrls.objects.create(url="https://example.com/v")
         upload = VideosUploaded.objects.create(
-            file_path="/tmp/does-not-exist-anywhere.mp4",
+            file_path=str(self.downloads / f"{codecurl.id}.mp4"),
             mime_type="video/mp4",
             codecurl=codecurl,
         )
+
         response = self.client.get(f"/api/v1/yt/videos-uploaded/{upload.id}")
+
         self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.data, {"error": "file not found"})
+
+    def test_download_returns_404_when_stored_path_is_empty(self):
+        codecurl = CodecUrls.objects.create(url="https://example.com/v")
+
+        for file_path in ("", None):
+            with self.subTest(file_path=file_path):
+                upload = VideosUploaded.objects.create(
+                    file_path=file_path, codecurl=codecurl
+                )
+                response = self.client.get(
+                    f"/api/v1/yt/videos-uploaded/{upload.id}"
+                )
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(
+                    response.data, {"error": "file not found"}
+                )
+
+    def test_null_codecurl_falls_back_to_stored_mime_and_suffix(self):
+        path = self.downloads / "legacy.m4a"
+        path.write_bytes(b"legacy-bytes")
+        upload = VideosUploaded.objects.create(
+            file_path=str(path), mime_type="audio/mp4", codecurl=None
+        )
+
+        response = self.client.get(f"/api/v1/yt/videos-uploaded/{upload.id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "audio/mp4")
+        self.assertIn(f"{upload.id}.m4a", response["Content-Disposition"])
+        self.assertEqual(
+            b"".join(response.streaming_content), b"legacy-bytes"
+        )
 
     def test_serializer_exposes_file_metadata(self):
         codecurl = CodecUrls.objects.create(url="https://example.com/v")
