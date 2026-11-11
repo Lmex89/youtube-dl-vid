@@ -4,14 +4,14 @@ import json
 import logging
 import mimetypes
 import shutil
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
 from django.conf import settings
 
 from videos.models import CodecUrls, StatusCodec, VideosUploaded
-from videos.profiles import get_profile
+from videos.profiles import BaseDownloadProfile, get_profile
 
 STAGING_DIR_NAME = ".tmp"
 URL_PREVIEW_LEN = 50
@@ -34,23 +34,39 @@ class JobPaths:
 
 @dataclass(frozen=True)
 class ServedFile:
+    """A servable file, or the reason it cannot be served (`not_found_reason`)."""
+
     path: Optional[Path]
     mime_type: str
     filename: str
-    exists: bool
+    not_found_reason: Optional[str] = None
+
+
+@dataclass
+class OrphanCounts:
+    files_deleted: int = 0
+    uploads_deleted: int = 0
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class SupersedeCounts(OrphanCounts):
+    superseded_requests: int = 0
+    staging_dirs_deleted: int = 0
+    logs_deleted: int = 0
+    codecurls_deleted: int = 0
 
 
 class DownloadStorage:
-    """Resolve artifact locations; roots are injected at construction time."""
+    """Artifact layout and file resolution; roots are injected."""
 
     def __init__(
         self,
         downloads_dir: Optional[Path] = None,
         logs_dir: Optional[Path] = None,
-        is_running: Callable[[str], bool] = lambda codecurl_id: False,
     ):
-        # Injected to avoid importing videos.download (circular dependency).
-        self._is_running = is_running
         self.downloads_dir = Path(
             downloads_dir
             if downloads_dir is not None
@@ -64,7 +80,9 @@ class DownloadStorage:
     def staging_root(self) -> Path:
         return self.downloads_dir / STAGING_DIR_NAME
 
-    def job_paths(self, codecurl_id: str, profile) -> JobPaths:
+    def job_paths(
+        self, codecurl_id: str, profile: BaseDownloadProfile
+    ) -> JobPaths:
         codecurl_id = str(codecurl_id)
         workdir = (
             self.staging_root / codecurl_id
@@ -104,7 +122,11 @@ class DownloadStorage:
             path=path,
             mime_type=mime_type,
             filename=f"{upload.id}.{extension}" if extension else str(upload.id),
-            exists=bool(path and path.exists()),
+            not_found_reason=(
+                "empty_file_path"
+                if path is None
+                else None if path.exists() else "file_not_found"
+            ),
         )
 
     def discard_staging(self, codecurl_id: str) -> bool:
@@ -125,6 +147,19 @@ class DownloadStorage:
             shutil.rmtree(staging_dir, ignore_errors=True)
             return True
         return False
+
+
+class DownloadRetention:
+    """Retention policy: supersede earlier jobs and clean up orphans."""
+
+    def __init__(
+        self,
+        storage: DownloadStorage,
+        # Injected to avoid importing videos.download (circular dependency).
+        is_running: Callable[[str], bool] = lambda codecurl_id: False,
+    ):
+        self.storage = storage
+        self._is_running = is_running
 
     def _superseded_ids(self, codecurl) -> list:
         """Earlier jobs for the same URL and profile that are not running.
@@ -160,13 +195,39 @@ class DownloadStorage:
         path = Path(file_path)
         try:
             (path.parent.resolve() / path.name).relative_to(
-                self.downloads_dir.resolve()
+                self.storage.downloads_dir.resolve()
             )
         except ValueError:
             return False
         return self._delete_file(path)
 
-    def supersede_earlier(self, codecurl, request_id: str = "unknown") -> dict:
+    def _remove_job(self, old_id, profile, counts: SupersedeCounts) -> None:
+        old_codecurl = CodecUrls.objects.filter(pk=old_id).first()
+        paths = self.storage.job_paths(str(old_id), profile)
+
+        for upload in VideosUploaded.objects.filter(codecurl_id=old_id):
+            if self._delete_owned_file(upload.file_path):
+                counts.files_deleted += 1
+            upload.delete()
+            counts.uploads_deleted += 1
+
+        if old_codecurl and old_codecurl.status == StatusCodec.SUCCESS:
+            old_codecurl.delete()
+            counts.codecurls_deleted += 1
+
+        if self._delete_file(paths.final):
+            counts.files_deleted += 1
+
+        if self.storage.discard_staging(str(old_id)):
+            counts.staging_dirs_deleted += 1
+
+        for log_path in (paths.log, paths.process_log, paths.title_log):
+            if self._delete_file(log_path):
+                counts.logs_deleted += 1
+
+    def supersede_earlier(
+        self, codecurl, request_id: str = "unknown"
+    ) -> SupersedeCounts:
         """Make *codecurl* replace earlier jobs for its URL and profile.
 
         Removes the superseded Video subido rows and their final files, staging
@@ -174,41 +235,13 @@ class DownloadStorage:
         are deleted with their artifacts; failed attempts stay as history.
         """
         superseded = self._superseded_ids(codecurl)
-        counts = {
-            "superseded_requests": len(superseded),
-            "files_deleted": 0,
-            "staging_dirs_deleted": 0,
-            "logs_deleted": 0,
-            "uploads_deleted": 0,
-            "codecurls_deleted": 0,
-        }
+        counts = SupersedeCounts(superseded_requests=len(superseded))
         if not superseded:
             return counts
 
         profile = get_profile(codecurl.output_profile)
         for old_id in superseded:
-            old_codecurl = CodecUrls.objects.filter(pk=old_id).first()
-            paths = self.job_paths(str(old_id), profile)
-
-            for upload in VideosUploaded.objects.filter(codecurl_id=old_id):
-                if self._delete_owned_file(upload.file_path):
-                    counts["files_deleted"] += 1
-                upload.delete()
-                counts["uploads_deleted"] += 1
-
-            if old_codecurl and old_codecurl.status == StatusCodec.SUCCESS:
-                old_codecurl.delete()
-                counts["codecurls_deleted"] += 1
-
-            if self._delete_file(paths.final):
-                counts["files_deleted"] += 1
-
-            if self.discard_staging(str(old_id)):
-                counts["staging_dirs_deleted"] += 1
-
-            for log_path in (paths.log, paths.process_log, paths.title_log):
-                if self._delete_file(log_path):
-                    counts["logs_deleted"] += 1
+            self._remove_job(old_id, profile, counts)
 
         logger.info(
             json.dumps({
@@ -216,30 +249,30 @@ class DownloadStorage:
                 "codecurl_id": str(codecurl.id),
                 "url_preview": preview_url(codecurl.url),
                 "output_profile": codecurl.output_profile,
-                **counts,
+                **counts.as_dict(),
                 "request_id": request_id,
             })
         )
         return counts
 
-    def cleanup_orphans(self, request_id: str = "unknown") -> dict:
+    def cleanup_orphans(self, request_id: str = "unknown") -> OrphanCounts:
         """Delete Video subido rows without a Solicitud de descarga.
 
         Removes each row and its file only when the file lives under the
         downloads root; never removes the root itself. Missing files are fine.
         """
-        counts = {"files_deleted": 0, "uploads_deleted": 0}
+        counts = OrphanCounts()
         orphans = list(VideosUploaded.objects.filter(codecurl__isnull=True))
         for upload in orphans:
             if self._delete_owned_file(upload.file_path):
-                counts["files_deleted"] += 1
+                counts.files_deleted += 1
             upload.delete()
-            counts["uploads_deleted"] += 1
+            counts.uploads_deleted += 1
 
         logger.info(
             json.dumps({
                 "event": "download_orphans_cleaned",
-                **counts,
+                **counts.as_dict(),
                 "request_id": request_id,
             })
         )

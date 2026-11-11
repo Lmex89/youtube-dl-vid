@@ -22,7 +22,12 @@ from videos.download import (
 from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
 from videos.profiles import PROFILES, get_profile
 from videos.runner import FakeCommandRunner, set_test_runner
-from videos.storage import STAGING_DIR_NAME, DownloadStorage
+from videos.storage import (
+    STAGING_DIR_NAME,
+    DownloadRetention,
+    DownloadStorage,
+    OrphanCounts,
+)
 
 
 class ProfileRegistryTests(TestCase):
@@ -1305,6 +1310,11 @@ class CleanupDownloadsCommandTests(TestCase):
         out = StringIO()
         call_command("cleanup_downloads", request_id=request_id, stdout=out)
         return json.loads(out.getvalue())
+
+    def test_cleanup_orphans_returns_typed_counts(self):
+        counts = DownloadRetention(DownloadStorage()).cleanup_orphans()
+
+        self.assertEqual(counts, OrphanCounts())
 
     def test_removes_orphan_row_and_file_but_keeps_owned_upload(self):
         orphan_file = self._downloads / "orphan.mp4"
