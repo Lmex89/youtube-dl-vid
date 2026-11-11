@@ -15,7 +15,10 @@ class FakeCommandRunner(CommandRunner):
     Each ``run()`` call consumes one script from *scripts* (FIFO).
     A script is a dict with optional keys:
 
-    * ``progress`` — list of float percentages emitted via *progress_callback*
+    * ``progress`` — list of *bytes* output lines (e.g. ``b"[download] 50%"``
+      for yt-dlp, ``b"out_time_us=5000000"`` for ffmpeg).  Each line is fed
+      through the supplied *progress_parser*, which in turn calls
+      *progress_callback* — exactly like the real subprocess runner.
     * ``output_file`` — path to create (auto-detected from command if omitted)
     * ``output_content`` — bytes written to *output_file* (default ``b"fake"``)
     * ``fail`` — if truthy, raise ``RuntimeError`` after creating the file
@@ -32,16 +35,14 @@ class FakeCommandRunner(CommandRunner):
     @staticmethod
     def _detect_output_file(command: List[str]) -> Optional[str]:
         """Extract output path from a yt-dlp or ffmpeg command."""
-        if not command:
-            return None
         # ffprobe's last arg is the *input* file — don't overwrite it.
-        if "ffprobe" in command[0]:
+        if command and "ffprobe" in command[0]:
             return None
         if "-o" in command:
             idx = command.index("-o")
             if idx + 1 < len(command):
                 return command[idx + 1]
-        return command[-1]
+        return command[-1] if command else None
 
     def run(
         self,
@@ -59,24 +60,26 @@ class FakeCommandRunner(CommandRunner):
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text(script.get("log", ""))
 
-        output_file = script.get("output_file") or self._detect_output_file(command)
-        if output_file:
-            out = Path(output_file)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(script.get("output_content", b"fake"))
-
         if "--print-to-file" in command and "title" in script:
             title_file = Path(command[command.index("--print-to-file") + 2])
             title_file.write_text(script["title"])
 
-        for pct in script.get("progress", []):
-            if progress_callback:
-                progress_callback(pct)
+        for chunk in script.get("progress", []):
+            if progress_parser is not None and progress_callback is not None:
+                pct = progress_parser(chunk)
+                if pct is not None:
+                    progress_callback(pct)
 
         if script.get("timeout"):
             raise TimeoutError(script.get("error", "fake timeout"))
 
         if script.get("fail"):
             raise RuntimeError(script.get("error", "fake failure"))
+
+        output_file = script.get("output_file") or self._detect_output_file(command)
+        if output_file:
+            out = Path(output_file)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(script.get("output_content", b"fake"))
 
         return 0
