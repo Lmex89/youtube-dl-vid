@@ -496,6 +496,48 @@ class StandardVideoEndToEndTests(DownloadJobTestCase):
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
 
 
+class SuccessOrderingTests(DownloadJobTestCase):
+    """Estado exitoso is only ever written after VideosUploaded exists."""
+
+    def _post(self):
+        post = self.client.post(
+            "/api/v1/yt/videos-uploaded/",
+            {"url": "https://example.com/video"},
+            format="json",
+        )
+        self.assertEqual(post.status_code, 202)
+        return post.data["id"]
+
+    def test_success_is_saved_only_when_upload_record_exists(self):
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        seen = []
+        real_save = CodecUrls.save
+
+        def spy(instance, *args, **kwargs):
+            if instance.status == StatusCodec.SUCCESS:
+                seen.append(
+                    VideosUploaded.objects.filter(codecurl_id=instance.pk).exists()
+                )
+            return real_save(instance, *args, **kwargs)
+
+        with patch.object(CodecUrls, "save", spy):
+            codecurl_id = self._post()
+            _wait_for_download(codecurl_id)
+
+        self.assertEqual(seen, [True])
+
+    def test_failed_upload_record_never_yields_success(self):
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        with patch.object(
+            VideosUploaded.objects, "create", side_effect=RuntimeError("db down")
+        ):
+            codecurl_id = self._post()
+            _wait_for_download(codecurl_id)
+
+        self.assertEqual(CodecUrls.objects.get(pk=codecurl_id).status, StatusCodec.ERROR)
+        self.assertFalse(VideosUploaded.objects.exists())
+
+
 class StorageLayoutEndToEndTests(DownloadJobTestCase):
     """HTTP jobs keep final files and logs under the injected roots."""
 
