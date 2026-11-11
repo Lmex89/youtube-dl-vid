@@ -187,5 +187,3 @@ CACHES = {
 
 RATELIMIT_USE_CACHE = "ratelimit"
 RATELIMIT_VIEW = "videos.views.ratelimited_error"
-
-COMMAND_RUNNER = "videos.runner.SubprocessCommandRunner"
