@@ -32,6 +32,10 @@ class JobPaths:
     title_log: Path
 
 
+REASON_EMPTY_FILE_PATH = "empty_file_path"
+REASON_FILE_NOT_FOUND = "file_not_found"
+
+
 @dataclass(frozen=True)
 class ServedFile:
     """A servable file, or the reason it cannot be served (`not_found_reason`)."""
@@ -118,15 +122,17 @@ class DownloadStorage:
             or (mimetypes.guess_type(path.name)[0] if path else "")
             or "application/octet-stream"
         )
+        if path is None:
+            not_found_reason = REASON_EMPTY_FILE_PATH
+        elif not path.exists():
+            not_found_reason = REASON_FILE_NOT_FOUND
+        else:
+            not_found_reason = None
         return ServedFile(
             path=path,
             mime_type=mime_type,
             filename=f"{upload.id}.{extension}" if extension else str(upload.id),
-            not_found_reason=(
-                "empty_file_path"
-                if path is None
-                else None if path.exists() else "file_not_found"
-            ),
+            not_found_reason=not_found_reason,
         )
 
     def discard_staging(self, codecurl_id: str) -> bool:
