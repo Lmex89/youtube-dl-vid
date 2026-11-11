@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -7,7 +8,7 @@ from typing import Optional
 from django.conf import settings
 from loguru import logger
 
-from videos.runner import CommandRunner
+from videos.runner import CommandRunner, get_command_runner
 
 FFPROBE_TIMEOUT = 30  # seconds
 
@@ -21,8 +22,6 @@ def probe_duration(
     log file.  We read it back from there — no new return value on the
     interface.
     """
-    from videos.runner import get_command_runner
-
     if runner is None:
         runner = get_command_runner()
 
@@ -44,7 +43,7 @@ def probe_duration(
         if not text:
             return None
         duration = float(text)
-    except Exception:
+    except (RuntimeError, TimeoutError, subprocess.SubprocessError, ValueError, OSError):
         logger.warning(
             json.dumps({
                 "event": "ffprobe_duration_failed",
