@@ -15,6 +15,8 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from videos.download import (
+    JobState,
+    get_job_state,
     is_download_running,
     stale_pending_jobs,
     start_download_async,
@@ -22,7 +24,12 @@ from videos.download import (
 from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
 from videos.profiles import PROFILES, get_profile
 from videos.runner import FakeCommandRunner, set_test_runner
-from videos.storage import STAGING_DIR_NAME, DownloadStorage
+from videos.storage import (
+    STAGING_DIR_NAME,
+    DownloadRetention,
+    DownloadStorage,
+    OrphanCounts,
+)
 
 
 class ProfileRegistryTests(TestCase):
@@ -415,6 +422,37 @@ def _wait_for_download(codecurl_id: str, timeout: float = 5.0) -> None:
     raise TimeoutError(f"download {codecurl_id} did not finish in {timeout}s")
 
 
+class ResolveLegacyFallbackTests(TestCase):
+    def setUp(self):
+        self.storage = DownloadStorage(
+            downloads_dir=Path("/dl"), logs_dir=Path("/logs")
+        )
+
+    def test_legacy_row_without_profile_uses_stored_mime_and_suffix(self):
+        upload = VideosUploaded.objects.create(
+            file_path="/dl/legacy.m4a", mime_type="audio/mp4", codecurl=None
+        )
+
+        served = self.storage.resolve(upload)
+
+        self.assertEqual(served.mime_type, "audio/mp4")
+        self.assertEqual(served.filename, f"{upload.id}.m4a")
+
+    def test_row_with_profile_uses_profile_mime_and_extension(self):
+        codecurl = CodecUrls.objects.create(
+            url="https://example.com/v",
+            output_profile=OutputProfile.AUDIO_M4A,
+        )
+        upload = VideosUploaded.objects.create(
+            file_path="/dl/x.mp4", mime_type="video/mp4", codecurl=codecurl
+        )
+
+        served = self.storage.resolve(upload)
+
+        self.assertEqual(served.mime_type, "audio/mp4")
+        self.assertEqual(served.filename, f"{upload.id}.m4a")
+
+
 class DownloadJobTestCase(TransactionTestCase):
     """Real thread path against a real test DB and temp downloads dir."""
 
@@ -494,6 +532,48 @@ class StandardVideoEndToEndTests(DownloadJobTestCase):
         self.assertEqual(get.status_code, 200)
         self.assertEqual(get.data["status"], StatusCodec.ERROR)
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
+
+
+class SuccessOrderingTests(DownloadJobTestCase):
+    """Estado exitoso is only ever written after VideosUploaded exists."""
+
+    def _post(self):
+        post = self.client.post(
+            "/api/v1/yt/videos-uploaded/",
+            {"url": "https://example.com/video"},
+            format="json",
+        )
+        self.assertEqual(post.status_code, 202)
+        return post.data["id"]
+
+    def test_success_is_saved_only_when_upload_record_exists(self):
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        seen = []
+        real_save = CodecUrls.save
+
+        def spy(instance, *args, **kwargs):
+            if instance.status == StatusCodec.SUCCESS:
+                seen.append(
+                    VideosUploaded.objects.filter(codecurl_id=instance.pk).exists()
+                )
+            return real_save(instance, *args, **kwargs)
+
+        with patch.object(CodecUrls, "save", spy):
+            codecurl_id = self._post()
+            _wait_for_download(codecurl_id)
+
+        self.assertEqual(seen, [True])
+
+    def test_failed_upload_record_never_yields_success(self):
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        with patch.object(
+            VideosUploaded.objects, "create", side_effect=RuntimeError("db down")
+        ):
+            codecurl_id = self._post()
+            _wait_for_download(codecurl_id)
+
+        self.assertEqual(CodecUrls.objects.get(pk=codecurl_id).status, StatusCodec.ERROR)
+        self.assertFalse(VideosUploaded.objects.exists())
 
 
 class StorageLayoutEndToEndTests(DownloadJobTestCase):
@@ -659,6 +739,26 @@ class ReencodeProfileEndToEndTests(DownloadJobTestCase):
         upload = VideosUploaded.objects.get(codecurl_id=cid)
         self.assertTrue(upload.file_path.endswith(f"{cid}.m4a"))
         self.assertEqual(upload.mime_type, "audio/mp4")
+
+
+class GetJobStateTests(TestCase):
+    def test_returns_state_for_each_status(self):
+        for status, progress in [(2, 42.5), (1, 100.0), (3, 7.0)]:
+            c = CodecUrls.objects.create(
+                url="https://example.com", status=status, progress=progress
+            )
+            self.assertEqual(get_job_state(str(c.id)), JobState(status, progress))
+
+    def test_unknown_id_returns_none(self):
+        import uuid
+
+        self.assertIsNone(get_job_state(str(uuid.uuid4())))
+
+    def test_detail_view_reads_through_get_job_state(self):
+        c = CodecUrls.objects.create(url="https://example.com", status=2, progress=10.0)
+        with patch("videos.views.get_job_state", return_value=JobState(1, 99.0)):
+            data = APIClient().get(f"/api/v1/yt/videos/{c.id}").json()
+        self.assertEqual((data["status"], data["progress"]), (1, 99.0))
 
 
 class ProgressSaverTests(TestCase):
@@ -1174,9 +1274,14 @@ class RunningJobProtectionTests(DownloadJobTestCase):
             runner.release.set()
             _wait_for_download(first_id)
 
-        first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
+        # Newest wins: the older job removes itself once it finishes.
+        self.assertFalse(
+            VideosUploaded.objects.filter(codecurl_id=first_id).exists()
+        )
+        self.assertFalse(staging.exists())
+        self.assertFalse(log.exists())
+        self.assertFalse((self._downloads / f"{first_id}.mp4").exists())
         second_upload = VideosUploaded.objects.get(codecurl_id=second_id)
-        self.assertTrue(Path(first_upload.file_path).exists())
         self.assertTrue(Path(second_upload.file_path).exists())
         self.assertTrue((self._downloads / f"{second_id}.mp4").exists())
 
@@ -1200,12 +1305,46 @@ class RunningJobProtectionTests(DownloadJobTestCase):
         runner.release.set()
         _wait_for_download(first_id)
 
-        first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
-        self.assertTrue(Path(first_upload.file_path).exists())
+        # Newest wins: the older job removes itself once it finishes.
+        self.assertFalse(first_final.exists())
+        self.assertFalse(first_log.exists())
+        self.assertFalse(
+            VideosUploaded.objects.filter(codecurl_id=first_id).exists()
+        )
         self.assertTrue((self._downloads / f"{second_id}.mp4").exists())
         self.assertTrue(
             VideosUploaded.objects.filter(codecurl_id=second_id).exists()
         )
+
+    def test_older_job_finishing_after_newer_success_leaves_nothing(self):
+        runner = self.GatedRunner(scripts=[{}, {}])
+        set_test_runner(runner)
+        first_id = self._post()
+        self.assertTrue(runner.entered.wait(5))
+        second_id = self._post()
+        _wait_for_download(second_id)
+
+        messages = []
+        sink = loguru_logger.add(messages.append, level="INFO")
+        self.addCleanup(loguru_logger.remove, sink)
+        runner.release.set()
+        _wait_for_download(first_id)
+
+        completed = [
+            json.loads(m.record["message"]) for m in messages
+            if '"video_download_completed"' in m.record["message"]
+        ]
+        self.assertNotIn(
+            first_id, [e["codecurl_id"] for e in completed]
+        )
+        self.assertFalse(
+            VideosUploaded.objects.filter(codecurl_id=first_id).exists()
+        )
+        self.assertEqual(
+            sorted(p.name for p in self._downloads.glob("*.mp4")),
+            [f"{second_id}.mp4"],
+        )
+        self.assertEqual(VideosUploaded.objects.count(), 1)
 
 
 class ConcurrentStartTests(DownloadJobTestCase):
@@ -1305,6 +1444,11 @@ class CleanupDownloadsCommandTests(TestCase):
         out = StringIO()
         call_command("cleanup_downloads", request_id=request_id, stdout=out)
         return json.loads(out.getvalue())
+
+    def test_cleanup_orphans_returns_typed_counts(self):
+        counts = DownloadRetention(DownloadStorage()).cleanup_orphans()
+
+        self.assertEqual(counts, OrphanCounts())
 
     def test_removes_orphan_row_and_file_but_keeps_owned_upload(self):
         orphan_file = self._downloads / "orphan.mp4"

@@ -1,6 +1,6 @@
 # youtube-dl-vid
 
-A Django 4.2 REST API that downloads videos via yt-dlp (YouTube, Facebook, and
+A Django 5.2 REST API that downloads videos via yt-dlp (YouTube, Facebook, and
 other supported sites) as MP4, tracks real download progress, and serves the
 resulting files. Containerized with Docker Compose (Django + PostgreSQL).
 
@@ -23,7 +23,7 @@ resulting files. Containerized with Docker Compose (Django + PostgreSQL).
 
 | Layer | Technology |
 |---|---|
-| Backend | Python 3.12, Django ~4.2, DRF ~3.15 |
+| Backend | Python 3.14, Django ~5.2, DRF ~3.16 |
 | Database | PostgreSQL (via `psycopg[binary]`) |
 | Download | yt-dlp + ffmpeg |
 | Server | Gunicorn ~22 (2 workers × 2 threads) |

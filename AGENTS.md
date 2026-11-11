@@ -1,6 +1,6 @@
 # youtube-dl-vid
 
-Django 4.2 REST API that downloads YouTube videos via yt-dlp.
+Django 5.2 REST API (Python 3.14) that downloads YouTube videos via yt-dlp.
 
 ## Quick start
 
@@ -51,7 +51,7 @@ A `VideosUploaded` record is created only after the download succeeds.
 - **`videos/`** — models, views, serializers, yt-dlp integration
 - **`videos/profiles.py`** — output profiles (`standard_video`, `whatsapp_video`, `audio_m4a`): yt-dlp args, ffmpeg command, extension, MIME type; add profiles here via `BaseDownloadProfile` subclasses + `PROFILES` registry
 - **`videos/process.py`** — generic subprocess streaming runner + progress parsers (yt-dlp `[download] N%`); **`videos/media.py`** — ffprobe duration + ffmpeg runner (parses `out_time_us`)
-- **`videos/download.py`** — async worker orchestration: temp download dir → profile post-process → atomic move → DB record + cleanup
+- **`videos/download.py`** — async worker orchestration: temp download dir → profile post-process → atomic move → DB record + cleanup; public interface: `start_download_async` (start job) + `get_job_state` (read `JobState` status/progress, `None` if unknown)
 - **`Youtube_dl_vid/`** — project settings, logging config, middleware, URL routing
 - **`docker-entrypoint.sh`** — runs `makemigrations` → `migrate` → `collectstatic` → `gunicorn`
 - **`downloads/<codecurl-uuid>.<ext>`** — final files (`mp4`/`m4a`); re-encoded profiles stage under `downloads/.tmp/<codecurl-uuid>/` and are cleaned on success/failure. Old downloads for same URL **and profile** auto-cleaned. Per-download logs: `logs/<codecurl-uuid>.txt` (yt-dlp) and `logs/<codecurl-uuid>.ffmpeg.txt`
@@ -61,6 +61,9 @@ A `VideosUploaded` record is created only after the download succeeds.
 ## Key facts
 
 - **Rate limiting**: `django-ratelimit~=4.1` with `block=True`, key=`user_or_ip`, custom 429 view at `videos.views.ratelimited_error`. LocMemCache is per-process, so limits are enforced **per gunicorn worker**, not globally
+- **Running-job protection**: `is_download_running` reads the in-process thread registry, so supersession only protects jobs running in the **same gunicorn worker**; jobs running in another worker are not protected (accepted limit, see `shortcut:` in `DownloadRetention._superseded_ids`)
+- **Orphan metrics**: orphans carry no job id, so staging dirs and logs cannot be located; `download_orphans_cleaned` reports only `files_deleted` and `uploads_deleted`
+- **Orphan cleanup**: `manage.py cleanup_downloads` deletes `VideosUploaded` rows without a `CodecUrls` (and their files under `downloads/`). It is **manual only** — never scheduled or called from the worker
 - **Migrations**: entrypoint runs `makemigrations --no-input` then `migrate` on every start, so missing migrations are auto-generated — still create and commit them with `docker compose exec web python manage.py makemigrations` after model changes
 - **Download timeouts**: subprocesses capped at `settings.MEDIA_PROCESS_TIMEOUT=300s` (kills hung yt-dlp/ffmpeg; list orphaned `status=2` jobs with `manage.py list_stale_jobs`); `--socket-timeout 30` guards against network stalls
 - **No lint / format / typecheck config** exists
@@ -68,7 +71,7 @@ A `VideosUploaded` record is created only after the download succeeds.
   - `app.log` (INFO+, 30-day retention)
   - `error.log` (ERROR+, 90-day retention)
   - `debug.log` (DEBUG+, 7-day retention)
-- `psycopg[binary]` (not `psycopg2`) — musllinux wheels for Alpine
+- `psycopg[binary]~=3.3` (not `psycopg2`) — musllinux wheels on `python:3.14-alpine`
 - Non-root `appuser` created but runs as root for bind mount compatibility
 - `collectstatic` runs every container start (output to `staticfiles/`)
 - `ALLOWED_HOSTS = ["*"]`, CORS open, no auth on endpoints
