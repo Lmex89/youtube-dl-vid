@@ -1,6 +1,6 @@
 # youtube-dl-vid
 
-Django 4.2 REST API that downloads YouTube videos via yt-dlp.
+Django 5.2 REST API (Python 3.14) that downloads YouTube videos via yt-dlp.
 
 ## Quick start
 
@@ -71,7 +71,7 @@ A `VideosUploaded` record is created only after the download succeeds.
   - `app.log` (INFO+, 30-day retention)
   - `error.log` (ERROR+, 90-day retention)
   - `debug.log` (DEBUG+, 7-day retention)
-- `psycopg[binary]` (not `psycopg2`) — musllinux wheels for Alpine
+- `psycopg[binary]~=3.3` (not `psycopg2`) — musllinux wheels on `python:3.14-alpine`
 - Non-root `appuser` created but runs as root for bind mount compatibility
 - `collectstatic` runs every container start (output to `staticfiles/`)
 - `ALLOWED_HOSTS = ["*"]`, CORS open, no auth on endpoints
