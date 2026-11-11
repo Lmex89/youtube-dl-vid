@@ -39,21 +39,19 @@ def probe_duration(
         runner.run(
             command, log_path, label="ffprobe", timeout=FFPROBE_TIMEOUT
         )
-        text = log_path.read_text().strip()
-        if not text:
-            return None
-        duration = float(text)
+        # Empty output raises ValueError here, so it takes the warning path.
+        duration: Optional[float] = float(log_path.read_text().strip())
     except (RuntimeError, TimeoutError, subprocess.SubprocessError, ValueError, OSError):
+        duration = None
+    finally:
+        log_path.unlink(missing_ok=True)
+
+    if duration is None or duration <= 0:
         logger.warning(
             json.dumps({
                 "event": "ffprobe_duration_failed",
                 "path": str(path),
             })
         )
-        return None
-    finally:
-        log_path.unlink(missing_ok=True)
-
-    if duration <= 0:
         return None
     return duration

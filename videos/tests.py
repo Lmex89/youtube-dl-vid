@@ -21,6 +21,7 @@ from videos.download import (
     stale_pending_jobs,
     start_download_async,
 )
+from videos.media import probe_duration
 from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
 from videos.profiles import PROFILES, get_profile
 from videos.runner import set_test_runner
@@ -83,6 +84,37 @@ class ProgressParserTests(TestCase):
         parser = build_progress_parser(10.0)
         chunk = b"out_time_us=5000000\nout_time_us=20000000"
         self.assertEqual(parser(chunk), 100.0)
+
+
+class ProbeDurationTests(TestCase):
+    """Every unknown-duration outcome returns None and emits the warning."""
+
+    def _probe(self, script):
+        messages = []
+        sink = loguru_logger.add(messages.append, level="WARNING")
+        self.addCleanup(loguru_logger.remove, sink)
+        result = probe_duration(
+            Path("/x.mp4"), runner=FakeCommandRunner(scripts=[script])
+        )
+        events = [json.loads(m.record["message"])["event"] for m in messages]
+        return result, events
+
+    def test_valid_duration_returns_float_without_warning(self):
+        self.assertEqual(self._probe({"log": "10.5\n"}), (10.5, []))
+
+    def test_unknown_duration_returns_none_and_warns(self):
+        cases = {
+            "empty": {},
+            "non-numeric": {"log": "N/A"},
+            "zero": {"log": "0.0"},
+            "negative": {"log": "-3"},
+            "ffprobe failure": {"fail": True},
+        }
+        for name, script in cases.items():
+            with self.subTest(name):
+                self.assertEqual(
+                    self._probe(script), (None, ["ffprobe_duration_failed"])
+                )
 
 
 class FakeCommandRunnerParserTests(TestCase):
