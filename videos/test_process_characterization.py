@@ -12,8 +12,7 @@ from pathlib import Path
 from django.test import TestCase
 from loguru import logger as loguru_logger
 
-from videos.media import build_progress_parser
-from videos.process import parse_yt_dlp_progress, run_process
+from videos.process import build_progress_parser, parse_yt_dlp_progress, run_process
 
 
 class RunProcessSuccessTests(TestCase):
