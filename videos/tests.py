@@ -15,6 +15,8 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from videos.download import (
+    JobState,
+    get_job_state,
     is_download_running,
     stale_pending_jobs,
     start_download_async,
@@ -501,6 +503,48 @@ class StandardVideoEndToEndTests(DownloadJobTestCase):
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl_id).exists())
 
 
+class SuccessOrderingTests(DownloadJobTestCase):
+    """Estado exitoso is only ever written after VideosUploaded exists."""
+
+    def _post(self):
+        post = self.client.post(
+            "/api/v1/yt/videos-uploaded/",
+            {"url": "https://example.com/video"},
+            format="json",
+        )
+        self.assertEqual(post.status_code, 202)
+        return post.data["id"]
+
+    def test_success_is_saved_only_when_upload_record_exists(self):
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        seen = []
+        real_save = CodecUrls.save
+
+        def spy(instance, *args, **kwargs):
+            if instance.status == StatusCodec.SUCCESS:
+                seen.append(
+                    VideosUploaded.objects.filter(codecurl_id=instance.pk).exists()
+                )
+            return real_save(instance, *args, **kwargs)
+
+        with patch.object(CodecUrls, "save", spy):
+            codecurl_id = self._post()
+            _wait_for_download(codecurl_id)
+
+        self.assertEqual(seen, [True])
+
+    def test_failed_upload_record_never_yields_success(self):
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        with patch.object(
+            VideosUploaded.objects, "create", side_effect=RuntimeError("db down")
+        ):
+            codecurl_id = self._post()
+            _wait_for_download(codecurl_id)
+
+        self.assertEqual(CodecUrls.objects.get(pk=codecurl_id).status, StatusCodec.ERROR)
+        self.assertFalse(VideosUploaded.objects.exists())
+
+
 class StorageLayoutEndToEndTests(DownloadJobTestCase):
     """HTTP jobs keep final files and logs under the injected roots."""
 
@@ -664,6 +708,26 @@ class ReencodeProfileEndToEndTests(DownloadJobTestCase):
         upload = VideosUploaded.objects.get(codecurl_id=cid)
         self.assertTrue(upload.file_path.endswith(f"{cid}.m4a"))
         self.assertEqual(upload.mime_type, "audio/mp4")
+
+
+class GetJobStateTests(TestCase):
+    def test_returns_state_for_each_status(self):
+        for status, progress in [(2, 42.5), (1, 100.0), (3, 7.0)]:
+            c = CodecUrls.objects.create(
+                url="https://example.com", status=status, progress=progress
+            )
+            self.assertEqual(get_job_state(str(c.id)), JobState(status, progress))
+
+    def test_unknown_id_returns_none(self):
+        import uuid
+
+        self.assertIsNone(get_job_state(str(uuid.uuid4())))
+
+    def test_detail_view_reads_through_get_job_state(self):
+        c = CodecUrls.objects.create(url="https://example.com", status=2, progress=10.0)
+        with patch("videos.views.get_job_state", return_value=JobState(1, 99.0)):
+            data = APIClient().get(f"/api/v1/yt/videos/{c.id}").json()
+        self.assertEqual((data["status"], data["progress"]), (1, 99.0))
 
 
 class ProgressSaverTests(TestCase):
