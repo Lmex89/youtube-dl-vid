@@ -3,7 +3,7 @@ import uuid
 
 from django.core.management.base import BaseCommand
 
-from videos.storage import DownloadStorage
+from videos.storage import DownloadRetention, DownloadStorage
 
 
 class Command(BaseCommand):
@@ -18,5 +18,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         request_id = options["request_id"] or str(uuid.uuid4())
-        counts = DownloadStorage().cleanup_orphans(request_id=request_id)
-        self.stdout.write(json.dumps(counts))
+        counts = DownloadRetention(DownloadStorage()).cleanup_orphans(
+            request_id=request_id
+        )
+        self.stdout.write(json.dumps(counts.as_dict()))

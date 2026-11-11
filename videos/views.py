@@ -7,7 +7,7 @@ from django_ratelimit.decorators import ratelimit
 from rest_framework import generics, status
 from rest_framework.response import Response
 
-from videos.download import start_download_async
+from videos.download import get_job_state, start_download_async
 from videos.models import Categorias, CodecUrls, OutputProfile, VideosUploaded
 from videos.profiles import PROFILES, get_profile
 from videos.serializers import (
@@ -34,7 +34,11 @@ class CodecUrlsDetailAPIView(generics.RetrieveAPIView):
 
     @method_decorator(ratelimit(key='user_or_ip', rate='30/m', method='GET', block=True))
     def get(self, request, *args, **kwargs):
-        return super().get(request, *args, **kwargs)
+        response = super().get(request, *args, **kwargs)
+        state = get_job_state(kwargs["pk"])
+        if state:
+            response.data.update(status=state.status, progress=state.progress)
+        return response
 
 
 class CodecUrlsListCreateAPIView(generics.ListCreateAPIView):
@@ -223,15 +227,11 @@ class VideosUploadedDetailAPIView(generics.RetrieveAPIView):
         request_id = getattr(request, "request_id", "unknown")
         served = DownloadStorage().resolve(upload)
 
-        if served.path is None or not served.exists:
+        if served.not_found_reason:
             details = {
                 "event": "video_file_not_found",
                 "upload_id": str(upload.id),
-                "reason": (
-                    "empty_file_path"
-                    if served.path is None
-                    else "file_not_found"
-                ),
+                "reason": served.not_found_reason,
                 "request_id": request_id,
             }
             if served.path is not None:

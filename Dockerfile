@@ -1,7 +1,7 @@
 #syntax=docker/dockerfile:1
 
 # ===== Builder stage: create wheels and install packages =====
-FROM python:3.12-alpine AS builder
+FROM python:3.14-alpine AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -22,7 +22,7 @@ RUN pip install --upgrade pip setuptools wheel && \
         -r requirements.txt yt-dlp
 
 # ===== Final runtime stage: minimal image with only runtime deps =====
-FROM python:3.12-alpine
+FROM python:3.14-alpine
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

@@ -1,5 +1,6 @@
 import json
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -12,7 +13,7 @@ from videos.models import CodecUrls, StatusCodec, VideosUploaded
 from videos.process import parse_yt_dlp_progress, run_process
 from videos.profiles import get_profile
 from videos.runner import CommandRunner, get_command_runner
-from videos.storage import DownloadStorage, preview_url
+from videos.storage import DownloadRetention, DownloadStorage, preview_url
 
 _download_threads: dict = {}
 _threads_lock = threading.Lock()
@@ -72,6 +73,22 @@ def is_download_running(codecurl_id: str) -> bool:
         return codecurl_id in _download_threads
 
 
+@dataclass(frozen=True)
+class JobState:
+    status: int  # 2=downloading, 1=success, 3=error
+    progress: float  # 0-100; raw DB value so the API response stays unchanged
+
+
+def get_job_state(codecurl_id: str) -> Optional[JobState]:
+    """Status/progress of the job, or None if the download request doesn't exist."""
+    row = (
+        CodecUrls.objects.filter(pk=codecurl_id)
+        .values_list("status", "progress")
+        .first()
+    )
+    return JobState(*row) if row else None
+
+
 def start_download_async(codecurl: CodecUrls, request_id: str = "unknown") -> CodecUrls:
     """Start the job for *codecurl* unless one is already registered.
 
@@ -105,32 +122,85 @@ def start_download_async(codecurl: CodecUrls, request_id: str = "unknown") -> Co
     return codecurl
 
 
+def _fetch_and_process(codecurl, profile, paths, save_progress, runner) -> str:
+    """Download, post-process and return the video title."""
+    destination = paths.final
+    workdir = paths.workdir
+    if profile.uses_temporary_files:
+        workdir.mkdir(parents=True, exist_ok=True)
+
+    download_weight = profile.download_weight
+
+    def on_download_progress(percent: float) -> None:
+        save_progress(percent * download_weight)
+
+    def on_process_progress(percent: float) -> None:
+        base = download_weight * 100
+        save_progress(base + percent * (100 - base) / 100)
+
+    title_path = paths.title_log
+    title_path.unlink(missing_ok=True)
+    command = profile.build_command(codecurl.url, destination, workdir)
+    command += ["--print-to-file", "%(title)s", str(title_path)]
+    run_download(
+        command,
+        paths.log,
+        progress_callback=on_download_progress,
+        runner=runner,
+    )
+
+    source = profile.locate_source(workdir, destination)
+    if profile.uses_temporary_files:
+        profile.post_process(
+            source,
+            destination,
+            paths.process_log,
+            on_process_progress,
+            runner=runner,
+        )
+
+    title = (
+        title_path.read_text(errors="replace").strip()
+        if title_path.exists()
+        else ""
+    ) or destination.stem
+    title_path.unlink(missing_ok=True)
+    return title
+
+
+def _record_success(codecurl_id: str, profile, destination: Path, title: str) -> CodecUrls:
+    codecurl = CodecUrls.objects.get(pk=codecurl_id)
+    VideosUploaded.objects.create(
+        file_path=str(destination),
+        mime_type=profile.mime_type,
+        title=title[:250],
+        codecurl=codecurl,
+    )
+    codecurl.status = StatusCodec.SUCCESS
+    codecurl.progress = 100.0
+    codecurl.save(update_fields=["status", "progress", "updated_at"])
+    return codecurl
+
+
+def _mark_failed(codecurl_id: str) -> None:
+    codecurl = CodecUrls.objects.filter(pk=codecurl_id).first()
+    if codecurl:
+        codecurl.status = StatusCodec.ERROR
+        codecurl.save(update_fields=["status", "updated_at"])
+
+
 def _async_download_worker(codecurl_id: str, request_id: str) -> None:
     close_old_connections()
-    storage = DownloadStorage(is_running=is_download_running)
+    storage = DownloadStorage()
+    retention = DownloadRetention(storage, is_running=is_download_running)
     runner = get_command_runner()
-
     save_progress = ProgressSaver(codecurl_id)
 
     try:
         codecurl = CodecUrls.objects.get(pk=codecurl_id)
         profile = get_profile(codecurl.output_profile)
         paths = storage.job_paths(codecurl_id, profile)
-
         destination = paths.final
-        log_path = paths.log
-        workdir = paths.workdir
-        if profile.uses_temporary_files:
-            workdir.mkdir(parents=True, exist_ok=True)
-
-        download_weight = profile.download_weight
-
-        def on_download_progress(percent: float) -> None:
-            save_progress(percent * download_weight)
-
-        def on_process_progress(percent: float) -> None:
-            base = download_weight * 100
-            save_progress(base + percent * (100 - base) / 100)
 
         logger.info(
             json.dumps({
@@ -142,47 +212,16 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
             })
         )
 
-        title_path = paths.title_log
-        title_path.unlink(missing_ok=True)
-        command = profile.build_command(codecurl.url, destination, workdir)
-        command += ["--print-to-file", "%(title)s", str(title_path)]
-        run_download(
-            command,
-            log_path,
-            progress_callback=on_download_progress,
-            runner=runner,
-        )
+        title = _fetch_and_process(codecurl, profile, paths, save_progress, runner)
+        codecurl = _record_success(codecurl_id, profile, destination, title)
 
-        source = profile.locate_source(workdir, destination)
-        if profile.uses_temporary_files:
-            profile.post_process(
-                source,
-                destination,
-                paths.process_log,
-                on_process_progress,
-                runner=runner,
-            )
-
-        title = (
-            title_path.read_text(errors="replace").strip()
-            if title_path.exists()
-            else ""
-        ) or destination.stem
-        title_path.unlink(missing_ok=True)
-
-        codecurl = CodecUrls.objects.get(pk=codecurl_id)
-        VideosUploaded.objects.create(
-            file_path=str(destination),
-            mime_type=profile.mime_type,
-            title=title[:250],
-            codecurl=codecurl,
-        )
-        codecurl.status = StatusCodec.SUCCESS
-        codecurl.progress = 100.0
-        codecurl.save(update_fields=["status", "progress", "updated_at"])
-
+        discarded = False
         try:
-            storage.supersede_earlier(codecurl, request_id=request_id)
+            discarded = retention.discard_if_superseded(
+                codecurl, request_id=request_id
+            )
+            if not discarded:
+                retention.supersede_earlier(codecurl, request_id=request_id)
         except Exception as exc:
             logger.exception(
                 json.dumps({
@@ -194,15 +233,16 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
                 })
             )
 
-        logger.info(
-            json.dumps({
-                "event": "video_download_completed",
-                "codecurl_id": codecurl_id,
-                "file_path": str(destination),
-                "output_profile": profile.name,
-                "request_id": request_id,
-            })
-        )
+        if not discarded:
+            logger.info(
+                json.dumps({
+                    "event": "video_download_completed",
+                    "codecurl_id": codecurl_id,
+                    "file_path": str(destination),
+                    "output_profile": profile.name,
+                    "request_id": request_id,
+                })
+            )
     except Exception as exc:
         logger.error(
             json.dumps({
@@ -213,10 +253,7 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
                 "request_id": request_id,
             })
         )
-        codecurl = CodecUrls.objects.filter(pk=codecurl_id).first()
-        if codecurl:
-            codecurl.status = StatusCodec.ERROR
-            codecurl.save(update_fields=["status", "updated_at"])
+        _mark_failed(codecurl_id)
     finally:
         storage.discard_staging(codecurl_id)
         with _threads_lock:

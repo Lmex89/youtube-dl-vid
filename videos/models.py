@@ -62,7 +62,7 @@ class VideosUploaded(BaseModel):
     id = models.UUIDField(primary_key=True, unique=True, default=uuid.uuid4)
     file_path = models.CharField(max_length=500, blank=True, null=True)
     mime_type = models.CharField(max_length=100, blank=True, default="")
-    title = models.CharField(max_length=250, default="test")
+    title = models.CharField(max_length=250)
     category = models.ForeignKey(Categorias, null=True, on_delete=models.SET_NULL)
     codecurl = models.ForeignKey(CodecUrls, null=True, on_delete=models.SET_NULL)
 
