@@ -23,7 +23,8 @@ from videos.download import (
 )
 from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
 from videos.profiles import PROFILES, get_profile
-from videos.runner import FakeCommandRunner, set_test_runner
+from videos.runner import set_test_runner
+from videos.test_utils import FakeCommandRunner
 from videos.storage import (
     STAGING_DIR_NAME,
     DownloadRetention,
