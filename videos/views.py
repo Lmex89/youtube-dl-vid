@@ -227,15 +227,11 @@ class VideosUploadedDetailAPIView(generics.RetrieveAPIView):
         request_id = getattr(request, "request_id", "unknown")
         served = DownloadStorage().resolve(upload)
 
-        if served.path is None or not served.exists:
+        if served.not_found_reason:
             details = {
                 "event": "video_file_not_found",
                 "upload_id": str(upload.id),
-                "reason": (
-                    "empty_file_path"
-                    if served.path is None
-                    else "file_not_found"
-                ),
+                "reason": served.not_found_reason,
                 "request_id": request_id,
             }
             if served.path is not None:

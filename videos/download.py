@@ -13,7 +13,7 @@ from videos.models import CodecUrls, StatusCodec, VideosUploaded
 from videos.process import parse_yt_dlp_progress, run_process
 from videos.profiles import get_profile
 from videos.runner import CommandRunner, get_command_runner
-from videos.storage import DownloadStorage, preview_url
+from videos.storage import DownloadRetention, DownloadStorage, preview_url
 
 _download_threads: dict = {}
 _threads_lock = threading.Lock()
@@ -191,7 +191,8 @@ def _mark_failed(codecurl_id: str) -> None:
 
 def _async_download_worker(codecurl_id: str, request_id: str) -> None:
     close_old_connections()
-    storage = DownloadStorage(is_running=is_download_running)
+    storage = DownloadStorage()
+    retention = DownloadRetention(storage, is_running=is_download_running)
     runner = get_command_runner()
     save_progress = ProgressSaver(codecurl_id)
 
@@ -215,7 +216,7 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
         codecurl = _record_success(codecurl_id, profile, destination, title)
 
         try:
-            storage.supersede_earlier(codecurl, request_id=request_id)
+            retention.supersede_earlier(codecurl, request_id=request_id)
         except Exception as exc:
             logger.exception(
                 json.dumps({
