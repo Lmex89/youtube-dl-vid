@@ -2,7 +2,7 @@ import json
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Optional
 
 from django.conf import settings
 from django.db import close_old_connections
@@ -10,9 +10,9 @@ from django.utils import timezone
 from loguru import logger
 
 from videos.models import CodecUrls, StatusCodec, VideosUploaded
-from videos.process import parse_yt_dlp_progress, run_process
+from videos.process import parse_yt_dlp_progress
 from videos.profiles import get_profile
-from videos.runner import CommandRunner, get_command_runner
+from videos.runner import get_command_runner
 from videos.storage import DownloadRetention, DownloadStorage, preview_url
 
 _download_threads: dict = {}
@@ -44,28 +44,6 @@ class ProgressSaver:
         CodecUrls.objects.filter(pk=self.codecurl_id).update(
             progress=value, updated_at=timezone.now()
         )
-
-
-def run_download(
-    command: List[str],
-    log_path: Path,
-    progress_callback: Optional[Callable[[float], None]] = None,
-    runner: Optional[CommandRunner] = None,
-) -> None:
-    if runner is None:
-        raise ValueError("run_download requires a CommandRunner")
-    runner.run(
-        command,
-        log_path,
-        label="yt_dlp",
-        timeout=settings.MEDIA_PROCESS_TIMEOUT,
-        progress_callback=progress_callback,
-        progress_parser=parse_yt_dlp_progress,
-    )
-
-    with open(log_path, "r", errors="replace") as f:
-        for line in f:
-            logger.debug(line.rstrip())
 
 
 def is_download_running(codecurl_id: str) -> bool:
@@ -142,12 +120,18 @@ def _fetch_and_process(codecurl, profile, paths, save_progress, runner) -> str:
     title_path.unlink(missing_ok=True)
     command = profile.build_command(codecurl.url, destination, workdir)
     command += ["--print-to-file", "%(title)s", str(title_path)]
-    run_download(
+    runner.run(
         command,
         paths.log,
+        label="yt_dlp",
+        timeout=settings.MEDIA_PROCESS_TIMEOUT,
         progress_callback=on_download_progress,
-        runner=runner,
+        progress_parser=parse_yt_dlp_progress,
     )
+
+    with open(paths.log, "r", errors="replace") as f:
+        for line in f:
+            logger.debug(line.rstrip())
 
     source = profile.locate_source(workdir, destination)
     if profile.uses_temporary_files:

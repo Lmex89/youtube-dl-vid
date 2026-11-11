@@ -12,6 +12,7 @@ PROGRESS_POLL_INTERVAL = 1.0  # seconds
 SLOW_PROCESS_THRESHOLD_MS = 500
 
 YT_DLP_PROGRESS_RE = re.compile(r"\[download\]\s+(\d+(?:\.\d+)?)%")
+FFMPEG_TIME_RE = re.compile(r"out_time_us=(\d+)")
 
 ProgressCallback = Callable[[float], None]
 ProgressParser = Callable[[bytes], Optional[float]]
@@ -26,6 +27,23 @@ def parse_yt_dlp_progress(chunk: bytes) -> Optional[float]:
         return float(matches[-1])
     except ValueError:
         return None
+
+
+def build_progress_parser(duration: float) -> ProgressParser:
+    """Return a parser that converts ffmpeg ``out_time_us`` lines to percent."""
+
+    def parse(chunk: bytes) -> Optional[float]:
+        text = chunk.decode("utf-8", errors="replace")
+        matches = FFMPEG_TIME_RE.findall(text)
+        if not matches:
+            return None
+        try:
+            seconds = int(matches[-1]) / 1_000_000
+        except ValueError:
+            return None
+        return max(0.0, min(100.0, seconds / duration * 100))
+
+    return parse
 
 
 def _stream_output(

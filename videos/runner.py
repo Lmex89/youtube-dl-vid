@@ -27,8 +27,8 @@ class CommandRunner(ABC):
         raise NotImplementedError
 
 
-class SubprocessCommandRunner(CommandRunner):
-    """Production runner — delegates to the real subprocess executor."""
+class _RealCommandRunner(CommandRunner):
+    """Production adapter — delegates to :func:`run_process`."""
 
     def run(
         self,
@@ -64,4 +64,4 @@ def get_command_runner() -> CommandRunner:
     """Return the active runner (test override or real subprocess adapter)."""
     if _test_runner is not None:
         return _test_runner
-    return SubprocessCommandRunner()
+    return _RealCommandRunner()

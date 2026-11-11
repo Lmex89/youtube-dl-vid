@@ -6,8 +6,9 @@ from typing import Callable, Dict, List, Optional
 from django.conf import settings
 from loguru import logger
 
-from videos.media import probe_duration, run_ffmpeg
+from videos.media import probe_duration
 from videos.models import OutputProfile
+from videos.process import build_progress_parser
 from videos.runner import CommandRunner
 
 SOURCE_TEMPLATE = "source.%(ext)s"
@@ -116,12 +117,14 @@ class WhatsappVideoProfile(TemporaryOutputProfile):
             command = self._build_ffmpeg_command(
                 source, destination, duration, height, audio_kbps, max_bytes
             )
-            run_ffmpeg(
+            progress_parser = build_progress_parser(duration) if duration else None
+            runner.run(
                 command,
                 log_path,
-                duration=duration,
-                progress_callback=on_progress,
-                runner=runner,
+                label="ffmpeg",
+                timeout=settings.MEDIA_PROCESS_TIMEOUT,
+                progress_callback=on_progress if progress_parser else None,
+                progress_parser=progress_parser,
             )
             size = destination.stat().st_size
             logger.info(

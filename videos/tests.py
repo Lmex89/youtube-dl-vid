@@ -54,7 +54,7 @@ class ProgressParserTests(TestCase):
         self.assertIsNone(parse_yt_dlp_progress(b"no progress here"))
 
     def test_ffmpeg_returns_latest_when_chunk_has_multiple_lines(self):
-        from videos.media import build_progress_parser
+        from videos.process import build_progress_parser
 
         # 100s duration, three out_time_us values: 10s, 50s, 90s
         chunk = (
@@ -66,19 +66,19 @@ class ProgressParserTests(TestCase):
         self.assertEqual(parser(chunk), 90.0)
 
     def test_ffmpeg_single_value_still_works(self):
-        from videos.media import build_progress_parser
+        from videos.process import build_progress_parser
 
         parser = build_progress_parser(100.0)
         self.assertEqual(parser(b"out_time_us=42500000"), 42.5)
 
     def test_ffmpeg_returns_none_when_no_match(self):
-        from videos.media import build_progress_parser
+        from videos.process import build_progress_parser
 
         parser = build_progress_parser(100.0)
         self.assertIsNone(parser(b"no progress here"))
 
     def test_ffmpeg_clamps_to_100_when_elapsed_exceeds_duration(self):
-        from videos.media import build_progress_parser
+        from videos.process import build_progress_parser
 
         parser = build_progress_parser(10.0)
         chunk = b"out_time_us=5000000\nout_time_us=20000000"
@@ -140,7 +140,7 @@ class FakeCommandRunnerParserTests(TestCase):
 
     def test_ffmpeg_parser_is_wired(self):
         """ffmpeg output lines go through the ffmpeg parser."""
-        from videos.media import build_progress_parser
+        from videos.process import build_progress_parser
 
         received = []
         parser = build_progress_parser(duration=10.0)
