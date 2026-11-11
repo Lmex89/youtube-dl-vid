@@ -21,15 +21,167 @@ from videos.download import (
     stale_pending_jobs,
     start_download_async,
 )
+from videos.media import probe_duration
 from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
 from videos.profiles import PROFILES, get_profile
-from videos.runner import FakeCommandRunner, set_test_runner
+from videos.runner import set_test_runner
+from videos.test_utils import FakeCommandRunner
 from videos.storage import (
     STAGING_DIR_NAME,
     DownloadRetention,
     DownloadStorage,
     OrphanCounts,
 )
+
+
+class ProgressParserTests(TestCase):
+    """Progress parsers must return the LATEST value when a single read
+    contains multiple progress lines (read1() returns up to N bytes)."""
+
+    def test_yt_dlp_returns_latest_when_chunk_has_multiple_lines(self):
+        from videos.process import parse_yt_dlp_progress
+
+        chunk = b"[download] 10.0%\n[download] 50.5%\n[download] 90.0%"
+        self.assertEqual(parse_yt_dlp_progress(chunk), 90.0)
+
+    def test_yt_dlp_single_line_still_works(self):
+        from videos.process import parse_yt_dlp_progress
+
+        self.assertEqual(parse_yt_dlp_progress(b"[download] 42.5%"), 42.5)
+
+    def test_yt_dlp_returns_none_when_no_match(self):
+        from videos.process import parse_yt_dlp_progress
+
+        self.assertIsNone(parse_yt_dlp_progress(b"no progress here"))
+
+    def test_ffmpeg_returns_latest_when_chunk_has_multiple_lines(self):
+        from videos.process import build_progress_parser
+
+        # 100s duration, three out_time_us values: 10s, 50s, 90s
+        chunk = (
+            b"out_time_us=10000000\n"
+            b"out_time_us=50000000\n"
+            b"out_time_us=90000000\n"
+        )
+        parser = build_progress_parser(100.0)
+        self.assertEqual(parser(chunk), 90.0)
+
+    def test_ffmpeg_single_value_still_works(self):
+        from videos.process import build_progress_parser
+
+        parser = build_progress_parser(100.0)
+        self.assertEqual(parser(b"out_time_us=42500000"), 42.5)
+
+    def test_ffmpeg_returns_none_when_no_match(self):
+        from videos.process import build_progress_parser
+
+        parser = build_progress_parser(100.0)
+        self.assertIsNone(parser(b"no progress here"))
+
+    def test_ffmpeg_clamps_to_100_when_elapsed_exceeds_duration(self):
+        from videos.process import build_progress_parser
+
+        parser = build_progress_parser(10.0)
+        chunk = b"out_time_us=5000000\nout_time_us=20000000"
+        self.assertEqual(parser(chunk), 100.0)
+
+
+class ProbeDurationTests(TestCase):
+    """Every unknown-duration outcome returns None and emits the warning."""
+
+    def _probe(self, script):
+        messages = []
+        sink = loguru_logger.add(messages.append, level="WARNING")
+        self.addCleanup(loguru_logger.remove, sink)
+        result = probe_duration(
+            Path("/x.mp4"), runner=FakeCommandRunner(scripts=[script])
+        )
+        events = [json.loads(m.record["message"])["event"] for m in messages]
+        return result, events
+
+    def test_valid_duration_returns_float_without_warning(self):
+        self.assertEqual(self._probe({"log": "10.5\n"}), (10.5, []))
+
+    def test_unknown_duration_returns_none_and_warns(self):
+        cases = {
+            "empty": {},
+            "non-numeric": {"log": "N/A"},
+            "zero": {"log": "0.0"},
+            "negative": {"log": "-3"},
+            "ffprobe failure": {"fail": True},
+        }
+        for name, script in cases.items():
+            with self.subTest(name):
+                self.assertEqual(
+                    self._probe(script), (None, ["ffprobe_duration_failed"])
+                )
+
+
+class FakeCommandRunnerParserTests(TestCase):
+    """FakeCommandRunner routes scripted progress through the parser."""
+
+    def _run_with(self, scripts, progress_parser, progress_callback):
+        import tempfile
+
+        runner = FakeCommandRunner(scripts)
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "test.log"
+            runner.run(
+                command=["fake-cmd", "-o", str(Path(tmp) / "out.mp4")],
+                log_path=log_path,
+                label="yt_dlp",
+                timeout=30,
+                progress_callback=progress_callback,
+                progress_parser=progress_parser,
+            )
+        return runner
+
+    def test_progress_lines_are_routed_through_parser(self):
+        """Scripted bytes go through progress_parser, not straight to callback."""
+        from videos.process import parse_yt_dlp_progress
+
+        received = []
+        self._run_with(
+            scripts=[{"progress": [b"[download] 25%", b"[download] 75%"]}],
+            progress_parser=parse_yt_dlp_progress,
+            progress_callback=received.append,
+        )
+        self.assertEqual(received, [25.0, 75.0])
+
+    def test_parser_returning_none_does_not_call_callback(self):
+        """Non-matching output lines produce no callback."""
+        from videos.process import parse_yt_dlp_progress
+
+        received = []
+        self._run_with(
+            scripts=[{"progress": [b"no progress here", b"[download] 50%"]}],
+            progress_parser=parse_yt_dlp_progress,
+            progress_callback=received.append,
+        )
+        self.assertEqual(received, [50.0])
+
+    def test_no_parser_means_no_callback(self):
+        """Without a parser, progress lines are silently ignored."""
+        received = []
+        self._run_with(
+            scripts=[{"progress": [b"[download] 50%"]}],
+            progress_parser=None,
+            progress_callback=received.append,
+        )
+        self.assertEqual(received, [])
+
+    def test_ffmpeg_parser_is_wired(self):
+        """ffmpeg output lines go through the ffmpeg parser."""
+        from videos.process import build_progress_parser
+
+        received = []
+        parser = build_progress_parser(duration=10.0)
+        self._run_with(
+            scripts=[{"progress": [b"out_time_us=5000000"]}],
+            progress_parser=parser,
+            progress_callback=received.append,
+        )
+        self.assertEqual(received, [50.0])
 
 
 class ProfileRegistryTests(TestCase):
@@ -484,7 +636,7 @@ class StandardVideoEndToEndTests(DownloadJobTestCase):
 
     def test_standard_video_success_end_to_end(self):
         runner = FakeCommandRunner(
-            scripts=[{"progress": [50.0, 100.0], "title": "Real Title"}]
+            scripts=[{"progress": [b"[download] 50%", b"[download] 100%"], "title": "Real Title"}]
         )
         set_test_runner(runner)
 
@@ -547,7 +699,7 @@ class SuccessOrderingTests(DownloadJobTestCase):
         return post.data["id"]
 
     def test_success_is_saved_only_when_upload_record_exists(self):
-        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [b"[download] 100%"]}]))
         seen = []
         real_save = CodecUrls.save
 
@@ -565,7 +717,7 @@ class SuccessOrderingTests(DownloadJobTestCase):
         self.assertEqual(seen, [True])
 
     def test_failed_upload_record_never_yields_success(self):
-        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [b"[download] 100%"]}]))
         with patch.object(
             VideosUploaded.objects, "create", side_effect=RuntimeError("db down")
         ):
@@ -580,7 +732,7 @@ class StorageLayoutEndToEndTests(DownloadJobTestCase):
     """HTTP jobs keep final files and logs under the injected roots."""
 
     def test_standard_success_uses_storage_layout(self):
-        runner = FakeCommandRunner(scripts=[{"progress": [100.0]}])
+        runner = FakeCommandRunner(scripts=[{"progress": [b"[download] 100%"]}])
         set_test_runner(runner)
 
         post = self.client.post(
@@ -607,19 +759,22 @@ class StorageLayoutEndToEndTests(DownloadJobTestCase):
 
     def test_whatsapp_success_uses_storage_layout_for_process_log(self):
         runner = FakeCommandRunner(
-            scripts=[{"progress": [100.0]}, {"progress": [100.0]}]
+            scripts=[
+                {"progress": [b"[download] 100%"]},
+                {},  # ffprobe: unknown duration
+                {"progress": [b"out_time_us=10000000"]},
+            ]
         )
         set_test_runner(runner)
 
-        with patch("videos.profiles.probe_duration", return_value=None):
-            post = self.client.post(
-                "/api/v1/yt/videos-uploaded/",
-                {
-                    "url": "https://example.com/video",
-                    "output_profile": OutputProfile.WHATSAPP_VIDEO,
-                },
-                format="json",
-            )
+        post = self.client.post(
+            "/api/v1/yt/videos-uploaded/",
+            {
+                "url": "https://example.com/video",
+                "output_profile": OutputProfile.WHATSAPP_VIDEO,
+            },
+            format="json",
+        )
         codecurl_id = post.data["id"]
         _wait_for_download(codecurl_id)
 
@@ -666,11 +821,12 @@ class ReencodeProfileEndToEndTests(DownloadJobTestCase):
 
     def _run(self, profile, scripts):
         ids = []
+        if profile == "whatsapp_video":
+            scripts = [scripts[0], {"log": "10.0"}, *scripts[1:]]
         runner = RecordingRunner(self.client, ids, scripts)
         set_test_runner(runner)
-        with patch("videos.profiles.probe_duration", return_value=10.0):
-            ids.append(self._post(profile))
-            _wait_for_download(ids[0])
+        ids.append(self._post(profile))
+        _wait_for_download(ids[0])
         return ids[0], runner
 
     def _assert_monotonic_across_phases(self, runner):
@@ -685,8 +841,8 @@ class ReencodeProfileEndToEndTests(DownloadJobTestCase):
         cid, runner = self._run(
             "whatsapp_video",
             [
-                {"progress": [20.0, 100.0]},
-                {"progress": [30.0, 100.0], "output_content": b"x" * 50},
+                {"progress": [b"[download] 20%", b"[download] 100%"]},
+                {"progress": [b"out_time_us=3000000", b"out_time_us=10000000"], "output_content": b"x" * 50},
             ],
         )
         self._assert_monotonic_across_phases(runner)
@@ -701,10 +857,10 @@ class ReencodeProfileEndToEndTests(DownloadJobTestCase):
         cid, runner = self._run(
             "whatsapp_video",
             [
-                {"progress": [100.0]},
-                {"progress": [100.0], "output_content": b"x" * 500},
-                {"progress": [100.0], "output_content": b"x" * 500},
-                {"progress": [100.0], "output_content": b"x" * 50},
+                {"progress": [b"[download] 100%"]},
+                {"progress": [b"out_time_us=10000000"], "output_content": b"x" * 500},
+                {"progress": [b"out_time_us=10000000"], "output_content": b"x" * 500},
+                {"progress": [b"out_time_us=10000000"], "output_content": b"x" * 50},
             ],
         )
         ffmpeg = [c["command"] for c in runner.calls if c["label"] == "ffmpeg"]
@@ -718,9 +874,9 @@ class ReencodeProfileEndToEndTests(DownloadJobTestCase):
         )
 
     def test_whatsapp_errors_when_no_ladder_step_fits(self):
-        big = {"progress": [100.0], "output_content": b"x" * 500}
+        big = {"progress": [b"out_time_us=10000000"], "output_content": b"x" * 500}
         cid, runner = self._run(
-            "whatsapp_video", [{"progress": [100.0]}, big, big, big]
+            "whatsapp_video", [{"progress": [b"[download] 100%"]}, big, big, big]
         )
         get = self.client.get(f"/api/v1/yt/videos/{cid}")
         self.assertEqual(get.data["status"], StatusCodec.ERROR)
@@ -728,7 +884,7 @@ class ReencodeProfileEndToEndTests(DownloadJobTestCase):
 
     def test_audio_progress_spans_download_and_post_process(self):
         cid, runner = self._run(
-            "audio_m4a", [{"progress": [40.0, 100.0]}]
+            "audio_m4a", [{"progress": [b"[download] 40%", b"[download] 100%"]}]
         )
         values = [v for _, v in runner.seen]
         self.assertEqual(values, sorted(values))
@@ -829,19 +985,22 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
         sentinel = self._downloads / "keep.txt"
         sentinel.write_text("keep")
         runner = FakeCommandRunner(
-            scripts=[{"progress": [100.0]}, {"progress": [100.0]}]
+            scripts=[
+                {"progress": [b"[download] 100%"]},
+                {},  # ffprobe: unknown duration
+                {"progress": [b"out_time_us=10000000"]},
+            ]
         )
         set_test_runner(runner)
 
-        with patch("videos.profiles.probe_duration", return_value=None):
-            post = self.client.post(
-                "/api/v1/yt/videos-uploaded/",
-                {
-                    "url": "https://example.com/video",
-                    "output_profile": OutputProfile.WHATSAPP_VIDEO,
-                },
-                format="json",
-            )
+        post = self.client.post(
+            "/api/v1/yt/videos-uploaded/",
+            {
+                "url": "https://example.com/video",
+                "output_profile": OutputProfile.WHATSAPP_VIDEO,
+            },
+            format="json",
+        )
 
         self.assertEqual(post.status_code, 202)
         codecurl_id = post.data["id"]
@@ -860,14 +1019,14 @@ class FailureCleanupEndToEndTests(DownloadJobTestCase):
         sentinel.write_text("keep")
         runner = FakeCommandRunner(
             scripts=[
-                {"progress": [100.0]},
+                {"progress": [b"[download] 100%"]},
+                {},
                 {"fail": True, "error": "ffmpeg failed"},
             ]
         )
         set_test_runner(runner)
 
-        with patch("videos.profiles.probe_duration", return_value=None):
-            post = self.client.post(
+        post = self.client.post(
                 "/api/v1/yt/videos-uploaded/",
                 {
                     "url": "https://example.com/video",
@@ -984,30 +1143,29 @@ class SupersedeOnSuccessTests(DownloadJobTestCase):
         }
 
     def test_second_success_removes_first_file_staging_logs_and_upload(self):
-        set_test_runner(FakeCommandRunner(scripts=[{}, {}, {}, {}]))
-        with patch("videos.profiles.probe_duration", return_value=None):
-            first_id = self._post(
-                "https://example.com/same", OutputProfile.WHATSAPP_VIDEO
-            )
-            _wait_for_download(first_id)
-            first = self._artifact_paths(first_id)
-            self.assertTrue(first["final"].exists())
-            self.assertTrue(first["log"].exists())
-            self.assertTrue(first["process_log"].exists())
+        set_test_runner(FakeCommandRunner(scripts=[{}, {}, {}, {}, {}, {}]))
+        first_id = self._post(
+            "https://example.com/same", OutputProfile.WHATSAPP_VIDEO
+        )
+        _wait_for_download(first_id)
+        first = self._artifact_paths(first_id)
+        self.assertTrue(first["final"].exists())
+        self.assertTrue(first["log"].exists())
+        self.assertTrue(first["process_log"].exists())
 
-            first["staging"].mkdir(parents=True)
-            (first["staging"] / "source.mp4").write_text("partial")
-            first["title_log"].write_text("First title")
-            first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
+        first["staging"].mkdir(parents=True)
+        (first["staging"] / "source.mp4").write_text("partial")
+        first["title_log"].write_text("First title")
+        first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
 
-            messages = []
-            sink = loguru_logger.add(messages.append, level="INFO")
-            self.addCleanup(loguru_logger.remove, sink)
+        messages = []
+        sink = loguru_logger.add(messages.append, level="INFO")
+        self.addCleanup(loguru_logger.remove, sink)
 
-            second_id = self._post(
-                "https://example.com/same", OutputProfile.WHATSAPP_VIDEO
-            )
-            _wait_for_download(second_id)
+        second_id = self._post(
+            "https://example.com/same", OutputProfile.WHATSAPP_VIDEO
+        )
+        _wait_for_download(second_id)
 
         self.assertFalse(
             VideosUploaded.objects.filter(pk=first_upload.pk).exists()
@@ -1072,7 +1230,7 @@ class SupersedeOnSuccessTests(DownloadJobTestCase):
         sink = loguru_logger.add(messages.append, level="INFO")
         self.addCleanup(loguru_logger.remove, sink)
 
-        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [b"[download] 100%"]}]))
         success_id = self._post("https://example.com/same")
         _wait_for_download(success_id)
 
@@ -1091,7 +1249,7 @@ class SupersedeOnSuccessTests(DownloadJobTestCase):
         self.assertEqual(superseded[0]["codecurls_deleted"], 0)
 
     def test_failed_second_download_leaves_first_servable(self):
-        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [b"[download] 100%"]}]))
         first_id = self._post("https://example.com/same")
         _wait_for_download(first_id)
         first = self._artifact_paths(first_id)
@@ -1122,17 +1280,16 @@ class SupersedeOnSuccessTests(DownloadJobTestCase):
         self.assertEqual(b"".join(get.streaming_content), b"fake")
 
     def test_other_profile_and_url_are_untouched(self):
-        set_test_runner(FakeCommandRunner())
+        set_test_runner(FakeCommandRunner(scripts=[{}, {}, {}, {}, {}]))
         first_id = self._post("https://example.com/same")
         _wait_for_download(first_id)
         first = self._artifact_paths(first_id)
         first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
 
-        with patch("videos.profiles.probe_duration", return_value=None):
-            other_profile_id = self._post(
-                "https://example.com/same", OutputProfile.WHATSAPP_VIDEO
-            )
-            _wait_for_download(other_profile_id)
+        other_profile_id = self._post(
+            "https://example.com/same", OutputProfile.WHATSAPP_VIDEO
+        )
+        _wait_for_download(other_profile_id)
 
         other_url_id = self._post("https://example.com/other")
         _wait_for_download(other_url_id)
@@ -1152,7 +1309,7 @@ class SupersedeOnSuccessTests(DownloadJobTestCase):
         )
 
     def test_post_does_not_delete_previous_file_while_job_is_pending(self):
-        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [b"[download] 100%"]}]))
         first_id = self._post("https://example.com/same")
         _wait_for_download(first_id)
         first = self._artifact_paths(first_id)
@@ -1160,7 +1317,7 @@ class SupersedeOnSuccessTests(DownloadJobTestCase):
 
         class BlockingRunner(FakeCommandRunner):
             def __init__(self):
-                super().__init__(scripts=[{"progress": [100.0]}])
+                super().__init__(scripts=[{"progress": [b"[download] 100%"]}])
                 self.entered = threading.Event()
                 self.release = threading.Event()
 
@@ -1203,7 +1360,7 @@ class SupersedeOnSuccessTests(DownloadJobTestCase):
             created_at=timezone.now() + timedelta(hours=1)
         )
 
-        set_test_runner(FakeCommandRunner(scripts=[{"progress": [100.0]}]))
+        set_test_runner(FakeCommandRunner(scripts=[{"progress": [b"[download] 100%"]}]))
         current_id = self._post(url)
         _wait_for_download(current_id)
 
@@ -1251,28 +1408,27 @@ class RunningJobProtectionTests(DownloadJobTestCase):
         return post.data["id"]
 
     def test_repeated_post_keeps_running_jobs_staging_and_output(self):
-        runner = self.GatedRunner(scripts=[{}, {}, {}, {}])
+        runner = self.GatedRunner(scripts=[{}, {}, {}, {}, {}, {}])
         set_test_runner(runner)
-        with patch("videos.profiles.probe_duration", return_value=None):
-            first_id = self._post(OutputProfile.WHATSAPP_VIDEO)
-            self.assertTrue(runner.entered.wait(5))
+        first_id = self._post(OutputProfile.WHATSAPP_VIDEO)
+        self.assertTrue(runner.entered.wait(5))
 
-            staging = self._downloads / STAGING_DIR_NAME / first_id
-            log = self._logs / f"{first_id}.txt"
-            staged = [path for path in staging.iterdir()]
-            self.assertTrue(staged)
-            self.assertTrue(log.exists())
+        staging = self._downloads / STAGING_DIR_NAME / first_id
+        log = self._logs / f"{first_id}.txt"
+        staged = [path for path in staging.iterdir()]
+        self.assertTrue(staged)
+        self.assertTrue(log.exists())
 
-            second_id = self._post(OutputProfile.WHATSAPP_VIDEO)
-            _wait_for_download(second_id)
+        second_id = self._post(OutputProfile.WHATSAPP_VIDEO)
+        _wait_for_download(second_id)
 
-            self.assertTrue(staging.is_dir())
-            for path in staged:
-                self.assertTrue(path.exists(), path)
-            self.assertTrue(log.exists())
+        self.assertTrue(staging.is_dir())
+        for path in staged:
+            self.assertTrue(path.exists(), path)
+        self.assertTrue(log.exists())
 
-            runner.release.set()
-            _wait_for_download(first_id)
+        runner.release.set()
+        _wait_for_download(first_id)
 
         # Newest wins: the older job removes itself once it finishes.
         self.assertFalse(
@@ -1356,7 +1512,7 @@ class ConcurrentStartTests(DownloadJobTestCase):
                 release.wait(5)
                 return super().run(*args, **kwargs)
 
-        runner = BlockingRunner(scripts=[{"progress": [100.0]}])
+        runner = BlockingRunner(scripts=[{"progress": [b"[download] 100%"]}])
         set_test_runner(runner)
         codecurl = CodecUrls.objects.create(url="https://example.com/video")
 
