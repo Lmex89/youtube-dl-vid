@@ -32,11 +32,16 @@ class FakeCommandRunner(CommandRunner):
     @staticmethod
     def _detect_output_file(command: List[str]) -> Optional[str]:
         """Extract output path from a yt-dlp or ffmpeg command."""
+        if not command:
+            return None
+        # ffprobe's last arg is the *input* file — don't overwrite it.
+        if "ffprobe" in command[0]:
+            return None
         if "-o" in command:
             idx = command.index("-o")
             if idx + 1 < len(command):
                 return command[idx + 1]
-        return command[-1] if command else None
+        return command[-1]
 
     def run(
         self,

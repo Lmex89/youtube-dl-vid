@@ -110,7 +110,7 @@ class WhatsappVideoProfile(TemporaryOutputProfile):
         if runner is None:
             raise ValueError("WhatsappVideoProfile.post_process requires a CommandRunner")
         max_bytes = settings.WHATSAPP_MEDIA_MAX_BYTES
-        duration = probe_duration(source)
+        duration = probe_duration(source, runner=runner)
 
         for height, audio_kbps in self.height_ladder:
             command = self._build_ffmpeg_command(
