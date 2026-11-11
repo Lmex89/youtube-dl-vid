@@ -1324,9 +1324,19 @@ class RunningJobProtectionTests(DownloadJobTestCase):
         second_id = self._post()
         _wait_for_download(second_id)
 
+        messages = []
+        sink = loguru_logger.add(messages.append, level="INFO")
+        self.addCleanup(loguru_logger.remove, sink)
         runner.release.set()
         _wait_for_download(first_id)
 
+        completed = [
+            json.loads(m.record["message"]) for m in messages
+            if '"video_download_completed"' in m.record["message"]
+        ]
+        self.assertNotIn(
+            first_id, [e["codecurl_id"] for e in completed]
+        )
         self.assertFalse(
             VideosUploaded.objects.filter(codecurl_id=first_id).exists()
         )

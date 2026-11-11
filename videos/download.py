@@ -215,10 +215,12 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
         title = _fetch_and_process(codecurl, profile, paths, save_progress, runner)
         codecurl = _record_success(codecurl_id, profile, destination, title)
 
+        discarded = False
         try:
-            if not retention.discard_if_superseded(
+            discarded = retention.discard_if_superseded(
                 codecurl, request_id=request_id
-            ):
+            )
+            if not discarded:
                 retention.supersede_earlier(codecurl, request_id=request_id)
         except Exception as exc:
             logger.exception(
@@ -231,15 +233,16 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
                 })
             )
 
-        logger.info(
-            json.dumps({
-                "event": "video_download_completed",
-                "codecurl_id": codecurl_id,
-                "file_path": str(destination),
-                "output_profile": profile.name,
-                "request_id": request_id,
-            })
-        )
+        if not discarded:
+            logger.info(
+                json.dumps({
+                    "event": "video_download_completed",
+                    "codecurl_id": codecurl_id,
+                    "file_path": str(destination),
+                    "output_profile": profile.name,
+                    "request_id": request_id,
+                })
+            )
     except Exception as exc:
         logger.error(
             json.dumps({
