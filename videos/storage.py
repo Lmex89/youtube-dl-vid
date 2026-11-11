@@ -293,6 +293,9 @@ class DownloadRetention:
 
         Removes each row and its file only when the file lives under the
         downloads root; never removes the root itself. Missing files are fine.
+
+        Limit: orphans carry no job id, so their staging dirs and logs cannot
+        be located; only `files_deleted` and `uploads_deleted` are reported.
         """
         counts = OrphanCounts()
         orphans = list(VideosUploaded.objects.filter(codecurl__isnull=True))

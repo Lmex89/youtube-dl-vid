@@ -62,6 +62,7 @@ A `VideosUploaded` record is created only after the download succeeds.
 
 - **Rate limiting**: `django-ratelimit~=4.1` with `block=True`, key=`user_or_ip`, custom 429 view at `videos.views.ratelimited_error`. LocMemCache is per-process, so limits are enforced **per gunicorn worker**, not globally
 - **Running-job protection**: `is_download_running` reads the in-process thread registry, so supersession only protects jobs running in the **same gunicorn worker**; jobs running in another worker are not protected (accepted limit, see `shortcut:` in `DownloadRetention._superseded_ids`)
+- **Orphan metrics**: orphans carry no job id, so staging dirs and logs cannot be located; `download_orphans_cleaned` reports only `files_deleted` and `uploads_deleted`
 - **Migrations**: entrypoint runs `makemigrations --no-input` then `migrate` on every start, so missing migrations are auto-generated — still create and commit them with `docker compose exec web python manage.py makemigrations` after model changes
 - **Download timeouts**: subprocesses capped at `settings.MEDIA_PROCESS_TIMEOUT=300s` (kills hung yt-dlp/ffmpeg; list orphaned `status=2` jobs with `manage.py list_stale_jobs`); `--socket-timeout 30` guards against network stalls
 - **No lint / format / typecheck config** exists
