@@ -255,6 +255,39 @@ class DownloadRetention:
         )
         return counts
 
+    def discard_if_superseded(
+        self, codecurl, request_id: str = "unknown"
+    ) -> bool:
+        """Remove *codecurl*'s own artifacts when a newer job already succeeded.
+
+        Newest wins: a slow older job finishing after a newer successful one
+        for the same URL and profile must not leave a file or row behind.
+        """
+        newer_success = CodecUrls.objects.filter(
+            url=codecurl.url,
+            output_profile=codecurl.output_profile,
+            created_at__gt=codecurl.created_at,
+            status=StatusCodec.SUCCESS,
+        ).exists()
+        if not newer_success:
+            return False
+
+        counts = SupersedeCounts()
+        self._remove_job(
+            codecurl.pk, get_profile(codecurl.output_profile), counts
+        )
+        logger.info(
+            json.dumps({
+                "event": "download_discarded_as_superseded",
+                "codecurl_id": str(codecurl.id),
+                "url_preview": preview_url(codecurl.url),
+                "output_profile": codecurl.output_profile,
+                **counts.as_dict(),
+                "request_id": request_id,
+            })
+        )
+        return True
+
     def cleanup_orphans(self, request_id: str = "unknown") -> OrphanCounts:
         """Delete Video subido rows without a Solicitud de descarga.
 

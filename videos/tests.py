@@ -1243,9 +1243,14 @@ class RunningJobProtectionTests(DownloadJobTestCase):
             runner.release.set()
             _wait_for_download(first_id)
 
-        first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
+        # Newest wins: the older job removes itself once it finishes.
+        self.assertFalse(
+            VideosUploaded.objects.filter(codecurl_id=first_id).exists()
+        )
+        self.assertFalse(staging.exists())
+        self.assertFalse(log.exists())
+        self.assertFalse((self._downloads / f"{first_id}.mp4").exists())
         second_upload = VideosUploaded.objects.get(codecurl_id=second_id)
-        self.assertTrue(Path(first_upload.file_path).exists())
         self.assertTrue(Path(second_upload.file_path).exists())
         self.assertTrue((self._downloads / f"{second_id}.mp4").exists())
 
@@ -1269,12 +1274,36 @@ class RunningJobProtectionTests(DownloadJobTestCase):
         runner.release.set()
         _wait_for_download(first_id)
 
-        first_upload = VideosUploaded.objects.get(codecurl_id=first_id)
-        self.assertTrue(Path(first_upload.file_path).exists())
+        # Newest wins: the older job removes itself once it finishes.
+        self.assertFalse(first_final.exists())
+        self.assertFalse(first_log.exists())
+        self.assertFalse(
+            VideosUploaded.objects.filter(codecurl_id=first_id).exists()
+        )
         self.assertTrue((self._downloads / f"{second_id}.mp4").exists())
         self.assertTrue(
             VideosUploaded.objects.filter(codecurl_id=second_id).exists()
         )
+
+    def test_older_job_finishing_after_newer_success_leaves_nothing(self):
+        runner = self.GatedRunner(scripts=[{}, {}])
+        set_test_runner(runner)
+        first_id = self._post()
+        self.assertTrue(runner.entered.wait(5))
+        second_id = self._post()
+        _wait_for_download(second_id)
+
+        runner.release.set()
+        _wait_for_download(first_id)
+
+        self.assertFalse(
+            VideosUploaded.objects.filter(codecurl_id=first_id).exists()
+        )
+        self.assertEqual(
+            sorted(p.name for p in self._downloads.glob("*.mp4")),
+            [f"{second_id}.mp4"],
+        )
+        self.assertEqual(VideosUploaded.objects.count(), 1)
 
 
 class ConcurrentStartTests(DownloadJobTestCase):
