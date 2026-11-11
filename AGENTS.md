@@ -49,9 +49,11 @@ A `VideosUploaded` record is created only after the download succeeds.
 ## Architecture
 
 - **`videos/`** — models, views, serializers, yt-dlp integration
-- **`videos/profiles.py`** — output profiles (`standard_video`, `whatsapp_video`, `audio_m4a`): yt-dlp args, ffmpeg command, extension, MIME type; add profiles here via `BaseDownloadProfile` subclasses + `PROFILES` registry
-- **`videos/process.py`** — generic subprocess streaming runner + progress parsers (yt-dlp `[download] N%`); **`videos/media.py`** — ffprobe duration + ffmpeg runner (parses `out_time_us`)
-- **`videos/download.py`** — async worker orchestration: temp download dir → profile post-process → atomic move → DB record + cleanup; public interface: `start_download_async` (start job) + `get_job_state` (read `JobState` status/progress, `None` if unknown)
+- **`videos/profiles.py`** — output profiles (`standard_video`, `whatsapp_video`, `audio_m4a`): yt-dlp args, ffmpeg command, extension, MIME type; add profiles here via `BaseDownloadProfile` subclasses + `PROFILES` registry. Profiles call `runner.run()` directly with the appropriate label and progress parser
+- **`videos/process.py`** — single deep command-execution module: `run_process()` (real subprocess executor with streaming output, timeout enforcement, structured JSON logging), progress parsers (`parse_yt_dlp_progress`, `build_progress_parser` for ffmpeg `out_time_us`), type aliases (`ProgressCallback`, `ProgressParser`)
+- **`videos/runner.py`** — injectable `CommandRunner` ABC + `get_command_runner()` factory. The real adapter (`_RealCommandRunner`) delegates to `run_process()`. `set_test_runner()` swaps in a `FakeCommandRunner` for tests. Callers use `runner.run(command, log_path, label, timeout, ...)` directly — no per-tool helper functions
+- **`videos/media.py`** — `probe_duration()` for ffprobe queries (has real logic: temp file, command assembly, duration parsing). No pass-through helpers; ffmpeg runs go through `runner.run()` directly from `profiles.py`
+- **`videos/download.py`** — async worker orchestration: temp download dir → profile post-process → atomic move → DB record + cleanup; public interface: `start_download_async` (start job) + `get_job_state` (read `JobState` status/progress, `None` if unknown). The worker calls `runner.run()` directly for yt-dlp with `label="yt_dlp"` and `progress_parser=parse_yt_dlp_progress`, then replays the log at DEBUG level
 - **`Youtube_dl_vid/`** — project settings, logging config, middleware, URL routing
 - **`docker-entrypoint.sh`** — runs `makemigrations` → `migrate` → `collectstatic` → `gunicorn`
 - **`downloads/<codecurl-uuid>.<ext>`** — final files (`mp4`/`m4a`); re-encoded profiles stage under `downloads/.tmp/<codecurl-uuid>/` and are cleaned on success/failure. Old downloads for same URL **and profile** auto-cleaned. Per-download logs: `logs/<codecurl-uuid>.txt` (yt-dlp) and `logs/<codecurl-uuid>.ffmpeg.txt`
