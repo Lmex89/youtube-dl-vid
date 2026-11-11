@@ -47,11 +47,11 @@ def probe_duration(path: Path) -> Optional[float]:
 def build_progress_parser(duration: float) -> ProgressParser:
     def parse(chunk: bytes) -> Optional[float]:
         text = chunk.decode("utf-8", errors="replace")
-        match = FFMPEG_TIME_RE.search(text)
-        if not match:
+        matches = FFMPEG_TIME_RE.findall(text)
+        if not matches:
             return None
         try:
-            seconds = int(match.group(1)) / 1_000_000
+            seconds = int(matches[-1]) / 1_000_000
         except ValueError:
             return None
         return max(0.0, min(100.0, seconds / duration * 100))
