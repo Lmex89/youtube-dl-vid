@@ -216,7 +216,10 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
         codecurl = _record_success(codecurl_id, profile, destination, title)
 
         try:
-            retention.supersede_earlier(codecurl, request_id=request_id)
+            if not retention.discard_if_superseded(
+                codecurl, request_id=request_id
+            ):
+                retention.supersede_earlier(codecurl, request_id=request_id)
         except Exception as exc:
             logger.exception(
                 json.dumps({
