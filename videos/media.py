@@ -1,6 +1,7 @@
 import json
+import os
 import re
-import subprocess as sp
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -14,23 +15,39 @@ FFPROBE_TIMEOUT = 30  # seconds
 FFMPEG_TIME_RE = re.compile(r"out_time_us=(\d+)")
 
 
-def probe_duration(path: Path) -> Optional[float]:
-    command = [
-        settings.FFPROBE_BINARY,
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        str(path),
-    ]
+def probe_duration(
+    path: Path, runner: Optional[CommandRunner] = None
+) -> Optional[float]:
+    """Return media duration in seconds via the command-execution interface.
+
+    ffprobe writes the duration to stdout, which the runner captures in the
+    log file.  We read it back from there — no new return value on the
+    interface.
+    """
+    from videos.runner import get_command_runner
+
+    if runner is None:
+        runner = get_command_runner()
+
+    fd, tmp = tempfile.mkstemp(suffix=".log")
+    os.close(fd)
+    log_path = Path(tmp)
     try:
-        result = sp.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=FFPROBE_TIMEOUT,
+        command = [
+            settings.FFPROBE_BINARY,
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ]
+        runner.run(
+            command, log_path, label="ffprobe", timeout=FFPROBE_TIMEOUT
         )
-        duration = float(result.stdout.strip())
-    except (sp.SubprocessError, ValueError):
+        text = log_path.read_text().strip()
+        if not text:
+            return None
+        duration = float(text)
+    except Exception:
         logger.warning(
             json.dumps({
                 "event": "ffprobe_duration_failed",
@@ -38,6 +55,8 @@ def probe_duration(path: Path) -> Optional[float]:
             })
         )
         return None
+    finally:
+        log_path.unlink(missing_ok=True)
 
     if duration <= 0:
         return None
