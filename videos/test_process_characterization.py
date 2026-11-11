@@ -12,7 +12,11 @@ from pathlib import Path
 from django.test import TestCase
 from loguru import logger as loguru_logger
 
-from videos.process import build_progress_parser, parse_yt_dlp_progress, run_process
+from videos.process import (
+    _RealCommandRunner,
+    build_progress_parser,
+    parse_yt_dlp_progress,
+)
 
 
 class RunProcessSuccessTests(TestCase):
@@ -24,7 +28,7 @@ class RunProcessSuccessTests(TestCase):
         self.log_path = Path(self._tmp.name) / "test.log"
 
     def test_echo_returns_zero_and_captures_output(self):
-        retcode = run_process(
+        retcode = _RealCommandRunner().run(
             command=["echo", "hello"],
             log_path=self.log_path,
             label="test_echo",
@@ -37,7 +41,7 @@ class RunProcessSuccessTests(TestCase):
         self.assertIn(b"hello", log_content)
 
     def test_python_print_returns_zero_and_captures_output(self):
-        retcode = run_process(
+        retcode = _RealCommandRunner().run(
             command=["python", "-c", "print('hello from python')"],
             log_path=self.log_path,
             label="test_python",
@@ -59,7 +63,7 @@ class RunProcessFailureTests(TestCase):
 
     def test_nonzero_exit_raises_runtime_error_with_label_and_code(self):
         with self.assertRaises(RuntimeError) as cm:
-            run_process(
+            _RealCommandRunner().run(
                 command=["python", "-c", "import sys; sys.exit(2)"],
                 log_path=self.log_path,
                 label="test_failure",
@@ -72,7 +76,7 @@ class RunProcessFailureTests(TestCase):
 
     def test_exit_code_1_raises_runtime_error(self):
         with self.assertRaises(RuntimeError) as cm:
-            run_process(
+            _RealCommandRunner().run(
                 command=["python", "-c", "import sys; sys.exit(1)"],
                 log_path=self.log_path,
                 label="another_label",
@@ -94,7 +98,7 @@ class RunProcessTimeoutTests(TestCase):
     def test_timeout_kills_process_and_raises_runtime_error(self):
         start = time.time()
         with self.assertRaises(RuntimeError) as cm:
-            run_process(
+            _RealCommandRunner().run(
                 command=["sleep", "10"],
                 log_path=self.log_path,
                 label="test_timeout",
@@ -136,7 +140,7 @@ for i in range(5):
 """
         received = []
 
-        retcode = run_process(
+        retcode = _RealCommandRunner().run(
             command=["python", "-c", script],
             log_path=self.log_path,
             label="yt_dlp_test",
@@ -184,7 +188,7 @@ for i in range(5):
         received = []
         parser = build_progress_parser(duration=10.0)
 
-        retcode = run_process(
+        retcode = _RealCommandRunner().run(
             command=["python", "-c", script],
             log_path=self.log_path,
             label="ffmpeg_test",
@@ -214,7 +218,7 @@ class JsonLoggingEventTests(TestCase):
         return [json.loads(m.record["message"]) for m in self.messages]
 
     def test_success_emits_started_and_completed_events(self):
-        run_process(
+        _RealCommandRunner().run(
             command=["echo", "test"],
             log_path=self.log_path,
             label="success_test",
@@ -238,7 +242,7 @@ class JsonLoggingEventTests(TestCase):
 
     def test_failure_emits_started_and_failed_events(self):
         with self.assertRaises(RuntimeError):
-            run_process(
+            _RealCommandRunner().run(
                 command=["python", "-c", "import sys; sys.exit(1)"],
                 log_path=self.log_path,
                 label="failure_test",
@@ -257,7 +261,7 @@ class JsonLoggingEventTests(TestCase):
 
     def test_timeout_emits_started_and_timed_out_events(self):
         with self.assertRaises(RuntimeError):
-            run_process(
+            _RealCommandRunner().run(
                 command=["sleep", "10"],
                 log_path=self.log_path,
                 label="timeout_test",
@@ -289,7 +293,7 @@ class SlowProcessWarningTests(TestCase):
 
     def test_slow_process_emits_warning_event(self):
         # Command that takes > 500ms
-        run_process(
+        _RealCommandRunner().run(
             command=["sleep", "1"],
             log_path=self.log_path,
             label="slow_test",
@@ -310,7 +314,7 @@ class SlowProcessWarningTests(TestCase):
         self.assertGreater(slow[0]["duration_ms"], 500)
 
     def test_fast_process_does_not_emit_slow_warning(self):
-        run_process(
+        _RealCommandRunner().run(
             command=["echo", "fast"],
             log_path=self.log_path,
             label="fast_test",

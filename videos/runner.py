@@ -1,55 +1,8 @@
-from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
-from videos.process import (
-    ProgressCallback,
-    ProgressParser,
-    SLOW_PROCESS_THRESHOLD_MS,
-    run_process,
-)
+from videos.process import CommandRunner, _RealCommandRunner
 
-
-class CommandRunner(ABC):
-    """Injectable adapter for subprocess execution (yt-dlp / ffmpeg)."""
-
-    @abstractmethod
-    def run(
-        self,
-        command: List[str],
-        log_path: Path,
-        label: str,
-        timeout: int,
-        progress_callback: Optional[ProgressCallback] = None,
-        progress_parser: Optional[ProgressParser] = None,
-        slow_threshold_ms: int = SLOW_PROCESS_THRESHOLD_MS,
-    ) -> int:
-        raise NotImplementedError
-
-
-class _RealCommandRunner(CommandRunner):
-    """Production adapter — delegates to :func:`run_process`."""
-
-    def run(
-        self,
-        command: List[str],
-        log_path: Path,
-        label: str,
-        timeout: int,
-        progress_callback: Optional[ProgressCallback] = None,
-        progress_parser: Optional[ProgressParser] = None,
-        slow_threshold_ms: int = SLOW_PROCESS_THRESHOLD_MS,
-    ) -> int:
-        return run_process(
-            command,
-            log_path,
-            label=label,
-            timeout=timeout,
-            progress_callback=progress_callback,
-            progress_parser=progress_parser,
-            slow_threshold_ms=slow_threshold_ms,
-        )
-
+__all__ = ["CommandRunner", "get_command_runner", "set_test_runner"]
 
 _test_runner: Optional[CommandRunner] = None
 
