@@ -19,11 +19,11 @@ ProgressParser = Callable[[bytes], Optional[float]]
 
 def parse_yt_dlp_progress(chunk: bytes) -> Optional[float]:
     text = chunk.decode("utf-8", errors="replace")
-    match = YT_DLP_PROGRESS_RE.search(text)
-    if not match:
+    matches = YT_DLP_PROGRESS_RE.findall(text)
+    if not matches:
         return None
     try:
-        return float(match.group(1))
+        return float(matches[-1])
     except ValueError:
         return None
 

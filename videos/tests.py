@@ -33,6 +33,58 @@ from videos.storage import (
 )
 
 
+class ProgressParserTests(TestCase):
+    """Progress parsers must return the LATEST value when a single read
+    contains multiple progress lines (read1() returns up to N bytes)."""
+
+    def test_yt_dlp_returns_latest_when_chunk_has_multiple_lines(self):
+        from videos.process import parse_yt_dlp_progress
+
+        chunk = b"[download] 10.0%\n[download] 50.5%\n[download] 90.0%"
+        self.assertEqual(parse_yt_dlp_progress(chunk), 90.0)
+
+    def test_yt_dlp_single_line_still_works(self):
+        from videos.process import parse_yt_dlp_progress
+
+        self.assertEqual(parse_yt_dlp_progress(b"[download] 42.5%"), 42.5)
+
+    def test_yt_dlp_returns_none_when_no_match(self):
+        from videos.process import parse_yt_dlp_progress
+
+        self.assertIsNone(parse_yt_dlp_progress(b"no progress here"))
+
+    def test_ffmpeg_returns_latest_when_chunk_has_multiple_lines(self):
+        from videos.media import build_progress_parser
+
+        # 100s duration, three out_time_us values: 10s, 50s, 90s
+        chunk = (
+            b"out_time_us=10000000\n"
+            b"out_time_us=50000000\n"
+            b"out_time_us=90000000\n"
+        )
+        parser = build_progress_parser(100.0)
+        self.assertEqual(parser(chunk), 90.0)
+
+    def test_ffmpeg_single_value_still_works(self):
+        from videos.media import build_progress_parser
+
+        parser = build_progress_parser(100.0)
+        self.assertEqual(parser(b"out_time_us=42500000"), 42.5)
+
+    def test_ffmpeg_returns_none_when_no_match(self):
+        from videos.media import build_progress_parser
+
+        parser = build_progress_parser(100.0)
+        self.assertIsNone(parser(b"no progress here"))
+
+    def test_ffmpeg_clamps_to_100_when_elapsed_exceeds_duration(self):
+        from videos.media import build_progress_parser
+
+        parser = build_progress_parser(10.0)
+        chunk = b"out_time_us=5000000\nout_time_us=20000000"
+        self.assertEqual(parser(chunk), 100.0)
+
+
 class ProfileRegistryTests(TestCase):
     def test_supported_profiles_are_registered(self):
         self.assertEqual(
