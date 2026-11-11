@@ -15,6 +15,8 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from videos.download import (
+    JobState,
+    get_job_state,
     is_download_running,
     stale_pending_jobs,
     start_download_async,
@@ -701,6 +703,26 @@ class ReencodeProfileEndToEndTests(DownloadJobTestCase):
         upload = VideosUploaded.objects.get(codecurl_id=cid)
         self.assertTrue(upload.file_path.endswith(f"{cid}.m4a"))
         self.assertEqual(upload.mime_type, "audio/mp4")
+
+
+class GetJobStateTests(TestCase):
+    def test_returns_state_for_each_status(self):
+        for status, progress in [(2, 42.5), (1, 100.0), (3, 7.0)]:
+            c = CodecUrls.objects.create(
+                url="https://example.com", status=status, progress=progress
+            )
+            self.assertEqual(get_job_state(str(c.id)), JobState(status, progress))
+
+    def test_unknown_id_returns_none(self):
+        import uuid
+
+        self.assertIsNone(get_job_state(str(uuid.uuid4())))
+
+    def test_detail_view_reads_through_get_job_state(self):
+        c = CodecUrls.objects.create(url="https://example.com", status=2, progress=10.0)
+        with patch("videos.views.get_job_state", return_value=JobState(1, 99.0)):
+            data = APIClient().get(f"/api/v1/yt/videos/{c.id}").json()
+        self.assertEqual((data["status"], data["progress"]), (1, 99.0))
 
 
 class ProgressSaverTests(TestCase):

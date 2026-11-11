@@ -1,5 +1,6 @@
 import json
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -70,6 +71,22 @@ def run_download(
 def is_download_running(codecurl_id: str) -> bool:
     with _threads_lock:
         return codecurl_id in _download_threads
+
+
+@dataclass(frozen=True)
+class JobState:
+    status: int  # 2=downloading, 1=success, 3=error
+    progress: float  # 0-100; raw DB value so the API response stays unchanged
+
+
+def get_job_state(codecurl_id: str) -> Optional[JobState]:
+    """Status/progress of the job, or None if the download request doesn't exist."""
+    row = (
+        CodecUrls.objects.filter(pk=codecurl_id)
+        .values_list("status", "progress")
+        .first()
+    )
+    return JobState(*row) if row else None
 
 
 def start_download_async(codecurl: CodecUrls, request_id: str = "unknown") -> CodecUrls:

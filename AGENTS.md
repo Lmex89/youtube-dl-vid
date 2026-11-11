@@ -51,7 +51,7 @@ A `VideosUploaded` record is created only after the download succeeds.
 - **`videos/`** — models, views, serializers, yt-dlp integration
 - **`videos/profiles.py`** — output profiles (`standard_video`, `whatsapp_video`, `audio_m4a`): yt-dlp args, ffmpeg command, extension, MIME type; add profiles here via `BaseDownloadProfile` subclasses + `PROFILES` registry
 - **`videos/process.py`** — generic subprocess streaming runner + progress parsers (yt-dlp `[download] N%`); **`videos/media.py`** — ffprobe duration + ffmpeg runner (parses `out_time_us`)
-- **`videos/download.py`** — async worker orchestration: temp download dir → profile post-process → atomic move → DB record + cleanup
+- **`videos/download.py`** — async worker orchestration: temp download dir → profile post-process → atomic move → DB record + cleanup; public interface: `start_download_async` (start job) + `get_job_state` (read `JobState` status/progress, `None` if unknown)
 - **`Youtube_dl_vid/`** — project settings, logging config, middleware, URL routing
 - **`docker-entrypoint.sh`** — runs `makemigrations` → `migrate` → `collectstatic` → `gunicorn`
 - **`downloads/<codecurl-uuid>.<ext>`** — final files (`mp4`/`m4a`); re-encoded profiles stage under `downloads/.tmp/<codecurl-uuid>/` and are cleaned on success/failure. Old downloads for same URL **and profile** auto-cleaned. Per-download logs: `logs/<codecurl-uuid>.txt` (yt-dlp) and `logs/<codecurl-uuid>.ffmpeg.txt`
