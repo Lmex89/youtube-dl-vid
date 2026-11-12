@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+
+from django.core.exceptions import ImproperlyConfigured
 
 from .logging_config import logger
 
@@ -6,7 +9,9 @@ logger.info("Django application started")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = "5!4a_zj5c!-(vv)^8taqortb*)vuw3&w7w&4=!dmd97xz&4udu"
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    raise ImproperlyConfigured("SECRET_KEY environment variable is required")
 
 DEBUG = False
 
@@ -72,14 +77,18 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "Youtube_dl_vid.wsgi.application"
 
+for _name in ("DB_NAME", "DB_USER", "DB_PASSWORD"):
+    if not os.environ.get(_name):
+        raise ImproperlyConfigured(f"{_name} environment variable is required")
+
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": "youtube_project",
-        "USER": "lmex",
-        "PASSWORD": "postgres",
-        "HOST": "db",
-        "PORT": "5432",
+        "NAME": os.environ["DB_NAME"],
+        "USER": os.environ["DB_USER"],
+        "PASSWORD": os.environ["DB_PASSWORD"],
+        "HOST": os.environ.get("DB_HOST", "db"),
+        "PORT": os.environ.get("DB_PORT", "5432"),
     }
 }
 

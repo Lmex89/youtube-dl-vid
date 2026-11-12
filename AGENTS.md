@@ -5,13 +5,18 @@ Django 5.2 REST API (Python 3.14) that downloads YouTube videos via yt-dlp.
 ## Quick start
 
 ```bash
+cp .env.example .env  # only if .env does not already exist
+# Fill in a new SECRET_KEY and the database values in .env.
 docker compose up --build
 ```
 
 - Web at `http://localhost:8011`, PostgreSQL at `localhost:51432`
-- DB host inside container is `db` (not `localhost`); credentials are hardcoded
-  in `Youtube_dl_vid/settings.py` — the `POSTGRES_*` env vars in
-  `docker-compose.yaml` are **not read**
+- Compose loads `.env` for both services and maps `DB_*` to Postgres variables;
+  Django requires non-empty `SECRET_KEY`, `DB_NAME`, `DB_USER` and `DB_PASSWORD`. DB host defaults to
+  `db` inside the container (not `localhost`).
+- Preserve the current DB name, user and password for an existing volume;
+  changing `.env` does not change PostgreSQL credentials. See README
+  Configuration for rotation and Compose quoting.
 - `DEBUG=False` always; only gunicorn via `docker-entrypoint.sh` (no `runserver`)
 - Repo is bind-mounted (`.:/code`), so code edits need no rebuild — but gunicorn
   runs without `--reload`
@@ -59,7 +64,6 @@ A `VideosUploaded` record is created only after the download succeeds.
 - **`docker-entrypoint.sh`** — runs `makemigrations` → `migrate` → `collectstatic` → `gunicorn`
 - **`downloads/<codecurl-uuid>.<ext>`** — final files (`mp4`/`m4a`); re-encoded profiles stage under `downloads/.tmp/<codecurl-uuid>/` and are cleaned on success/failure. Old downloads for same URL **and profile** auto-cleaned. Per-download logs: `logs/<codecurl-uuid>.txt` (yt-dlp) and `logs/<codecurl-uuid>.ffmpeg.txt`
 - Downloads run in a daemon thread (`start_download_async`) that updates `CodecUrls.progress` in DB in real time; the thread is tracked in a module-level registry keyed by codecurl id. Restarting the container kills in-flight downloads and leaves `status=2` forever (no retry/resume)
-- `Youtube_dl_vid/settings_bkp.py` is a dead Django 3.2 backup — edit `settings.py` only
 
 ## Key facts
 

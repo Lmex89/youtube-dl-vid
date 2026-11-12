@@ -1,7 +1,12 @@
 import json
+import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
+import unittest
 from datetime import timedelta
 from io import StringIO
 from pathlib import Path
@@ -10,7 +15,7 @@ from unittest.mock import patch
 from loguru import logger as loguru_logger
 from django.core.cache import caches
 from django.core.management import call_command
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -33,6 +38,94 @@ from videos.storage import (
     DownloadStorage,
     OrphanCounts,
 )
+
+
+class EnvironmentSettingsTests(SimpleTestCase):
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def run_manage(self, overrides, *args):
+        env = os.environ.copy()
+        env.pop("DJANGO_SETTINGS_MODULE", None)
+        env.update(
+            SECRET_KEY="test-secret", DB_NAME="testdb", DB_USER="testuser",
+            DB_PASSWORD="testpassword", DB_HOST="db", DB_PORT="5432",
+        )
+        for name, value in overrides.items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
+        return subprocess.run(
+            [sys.executable, "manage.py", *args],
+            cwd=self.ROOT, env=env, capture_output=True, text=True,
+        )
+
+    def test_missing_or_empty_required_variables_stop_startup(self):
+        for name in ("SECRET_KEY", "DB_NAME", "DB_USER", "DB_PASSWORD"):
+            for value in (None, ""):
+                with self.subTest(name=name, value=value):
+                    result = self.run_manage({name: value}, "check")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(name, result.stderr)
+
+    def test_complete_environment_passes_system_check(self):
+        result = self.run_manage({}, "check")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_database_settings_use_environment_and_host_port_defaults(self):
+        result = self.run_manage(
+            {"DB_HOST": None, "DB_PORT": None},
+            "shell", "-c",
+            "from django.conf import settings; "
+            "assert {k: settings.DATABASES['default'][k] for k in "
+            "('NAME', 'USER', 'PASSWORD', 'HOST', 'PORT')} == "
+            "{'NAME': 'testdb', 'USER': 'testuser', 'PASSWORD': 'testpassword', "
+            "'HOST': 'db', 'PORT': '5432'}",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+@unittest.skipUnless(shutil.which("docker"), "Docker Compose is not available")
+class ComposeConfigurationTests(SimpleTestCase):
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def compose_config(self, env_file_text, env_overrides=None, **kwargs):
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copy(self.ROOT / "docker-compose.yaml", tmp)
+            Path(tmp, ".env").write_text(env_file_text)
+            env = os.environ.copy()
+            for name in ("DB_NAME", "DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT"):
+                env.pop(name, None)
+            env.update(env_overrides or {})
+            return subprocess.run(
+                ["docker", "compose", "config", "--format", "json"],
+                cwd=tmp, env=env, capture_output=True, text=True, **kwargs,
+            )
+
+    def test_unfilled_example_rejects_empty_database_password(self):
+        result = self.compose_config((self.ROOT / ".env.example").read_text())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("DB_PASSWORD", result.stderr)
+
+    def test_shell_database_overrides_match_in_both_services(self):
+        overrides = dict(
+            DB_NAME="override-db", DB_USER="override-user",
+            DB_PASSWORD="override-password", DB_HOST="override-host",
+            DB_PORT="1234",
+        )
+        result = self.compose_config(
+            "SECRET_KEY=example-key\nDB_NAME=file-db\nDB_USER=file-user\n"
+            "DB_PASSWORD=file-password\nDB_HOST=db\nDB_PORT=5432\n",
+            overrides, check=True,
+        )
+        services = json.loads(result.stdout)["services"]
+        web = services["web"]["environment"]
+        db = services["db"]["environment"]
+        self.assertEqual(db["POSTGRES_DB"], overrides["DB_NAME"])
+        self.assertEqual(db["POSTGRES_USER"], overrides["DB_USER"])
+        self.assertEqual(db["POSTGRES_PASSWORD"], overrides["DB_PASSWORD"])
+        for name, value in overrides.items():
+            self.assertEqual(web[name], value)
 
 
 class ProgressParserTests(TestCase):

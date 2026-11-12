@@ -34,13 +34,20 @@ resulting files. Containerized with Docker Compose (Django + PostgreSQL).
 ## Quick start
 
 Prerequisites: Docker Engine 20.10+ and Docker Compose 2.0+.
+If `.env` already exists, keep it and skip the copy step.
 
 ```bash
 git clone <repository-url>
 cd youtube-dl-vid
+cp .env.example .env
+# Edit .env: set SECRET_KEY and the database values before starting.
 docker compose up --build
 ```
 
+- For an existing PostgreSQL volume, use its current database name, user and
+  password in `.env`; changing the file does not change the stored credentials.
+- Generate a new `SECRET_KEY` with `python3 -c 'import secrets; print(secrets.token_urlsafe(48))'`
+  and put it in `.env`. Keep it private.
 - Web API: `http://localhost:8011`
 - PostgreSQL: `localhost:51432` (internal hostname: `db`)
 - `DEBUG=False` always; served only by gunicorn via `docker-entrypoint.sh`
@@ -311,15 +318,42 @@ resolution/bitrate when needed.
 
 ## Configuration
 
-Environment variables (in `docker-compose.yaml`):
+Copy `.env.example` to the git-ignored `.env` and fill in the values. Compose
+loads this file into both services and maps the `DB_*` values to the PostgreSQL
+image's `POSTGRES_*` variables. Django reads the same database values.
 
-| Variable | Default | Purpose |
+| Variable | Default in Django | Purpose |
 |---|---|---|
-| `DJANGO_SETTINGS_MODULE` | `Youtube_dl_vid.settings` | Django settings path |
-| `TZ` | `America/Mexico_City` | Container timezone |
-| `POSTGRES_NAME` | `youtube_project` | Database name |
-| `POSTGRES_USER` | `lmex` | Database user |
-| `POSTGRES_PASSWORD` | `postgres` | Database password |
+| `SECRET_KEY` | None | Required, non-empty Django signing key |
+| `DB_NAME` | None | Required, non-empty database name; set it to the existing or new database name |
+| `DB_USER` | None | Required, non-empty database user; set it to the existing or new role |
+| `DB_PASSWORD` | None | Required, non-empty database password |
+| `DB_HOST` | `db` | Database host from the web container |
+| `DB_PORT` | `5432` | Database port from the web container |
+
+An absent or empty `SECRET_KEY`, `DB_NAME`, `DB_USER` or `DB_PASSWORD` stops Django at startup with a
+configuration error naming the missing variable; Compose also rejects a missing
+or empty `DB_PASSWORD`. `DJANGO_SETTINGS_MODULE` and `TZ` are set in Compose.
+
+Compose interpolates unquoted and double-quoted `.env` values, including `$`.
+Use single quotes for literal values (escape an embedded single quote as `\'`),
+or use generated URL-safe secrets to avoid quoting surprises. Exported `DB_*`
+shell variables override `.env` for Compose interpolation; unset unintended
+overrides. Avoid sharing `docker compose config` output: it can expose secrets.
+
+### Rotating secrets
+
+Treat the old keys in Git history as compromised. Replace `SECRET_KEY` with a
+unique random key and recreate the web service to apply it; this invalidates
+existing sessions and other signed data. Keep `.env` private and never commit it.
+
+For an existing PostgreSQL volume, changing `DB_PASSWORD` in `.env` alone does
+not update the database role. Plan a maintenance window, back up the database,
+change the role password in PostgreSQL (for example with psql's interactive
+`\password` command), then update `.env` and recreate the services so both use
+the new password (`docker compose up -d`). Do not delete the volume to rotate
+credentials. Changing `DB_NAME` or `DB_USER` in `.env` does not create a database
+or role in an initialized volume.
 
 Key settings in `Youtube_dl_vid/settings.py`:
 
@@ -420,7 +454,9 @@ Port `8011` or `51432` already in use → change the mapping in
 docker compose ps
 docker compose logs db
 ```
-Credentials in `docker-compose.yaml` must match `settings.py` `DATABASES`.
+Check that `.env` uses the database name, role and password already stored in
+the PostgreSQL volume, and that exported `DB_*` variables are not overriding it.
+For missing-secret errors, fill in the named variable in `.env`.
 
 **Reset everything (WARNING: deletes data)**
 ```bash
@@ -431,9 +467,10 @@ docker compose up --build
 ## Security notes
 
 Current defaults are development-friendly: `ALLOWED_HOSTS=["*"]`, open CORS,
-no auth, hardcoded `SECRET_KEY`. For production:
+and no auth. Use a unique `SECRET_KEY` and database password for each deployment
+and protect the environment file. For production, further changes are needed:
 
-- Set `SECRET_KEY` and `ALLOWED_HOSTS` via environment variables
+- Restrict `ALLOWED_HOSTS` in settings (it is not environment-configurable)
 - Restrict `CORS_ALLOWED_ORIGINS`
 - Add authentication to the endpoints
 - Terminate TLS with a reverse proxy
