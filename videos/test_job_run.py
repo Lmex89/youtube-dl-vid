@@ -12,6 +12,29 @@ from videos.test_utils import FakeCommandRunner
 
 
 class RunJobTests(TestCase):
+    def test_tool_output_is_not_replayed_into_application_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = DownloadStorage(Path(tmp) / "downloads", Path(tmp) / "logs")
+            codecurl = CodecUrls.objects.create(url="https://example.com/video")
+            messages = []
+            sink = logger.add(messages.append, level="DEBUG", filter=lambda record: record["name"] == "videos.job_run")
+            try:
+                outcome = run_job(
+                    str(codecurl.id), "request-44",
+                    runner=FakeCommandRunner(scripts=[{"log": "token=secret"}]),
+                    storage=storage, retention=DownloadRetention(storage),
+                )
+            finally:
+                logger.remove(sink)
+
+            self.assertEqual(outcome, "succeeded")
+            self.assertEqual((storage.logs_dir / f"{codecurl.id}.txt").read_text(), "token=secret")
+            events = [json.loads(message.record["message"]) for message in messages]
+            self.assertEqual([event["event"] for event in events], [
+                "download_pipeline_started", "video_download_completed",
+            ])
+            self.assertTrue(all(event["request_id"] == "request-44" for event in events))
+
     def test_standard_video_succeeds_synchronously(self):
         with tempfile.TemporaryDirectory() as tmp:
             storage = DownloadStorage(Path(tmp) / "downloads", Path(tmp) / "logs")

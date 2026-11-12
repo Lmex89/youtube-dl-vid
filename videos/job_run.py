@@ -58,10 +58,6 @@ def _fetch_and_process(codecurl, profile, paths, progress, runner) -> str:
         progress_parser=parse_yt_dlp_progress,
     )
 
-    with open(paths.log, "r", errors="replace") as f:
-        for line in f:
-            logger.debug(line.rstrip())
-
     source = profile.locate_source(workdir, destination)
     if profile.post_process is not None:
         profile.post_process(
