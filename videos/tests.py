@@ -740,7 +740,7 @@ class SuccessOrderingTests(DirectDownloadJobTestCase):
         self.assertFalse(VideosUploaded.objects.exists())
 
 
-class StorageLayoutEndToEndTests(DirectDownloadJobTestCase):
+class StorageLayoutJobTests(DirectDownloadJobTestCase):
     """Jobs keep final files and logs under the injected roots."""
 
     def test_standard_success_uses_storage_layout(self):
@@ -787,7 +787,7 @@ class StorageLayoutEndToEndTests(DirectDownloadJobTestCase):
 
 
 @override_settings(WHATSAPP_MEDIA_MAX_BYTES=100)
-class ReencodeProfileEndToEndTests(DirectDownloadJobTestCase):
+class ReencodeProfileJobTests(DirectDownloadJobTestCase):
     def _run(self, profile, scripts):
         if profile == "whatsapp_video":
             scripts = [scripts[0], {"log": "10.0"}, *scripts[1:]]

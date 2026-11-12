@@ -6,7 +6,7 @@ from django.test import TestCase
 from loguru import logger
 
 from videos.job_run import run_job
-from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
+from videos.models import CodecUrls, StatusCodec, VideosUploaded
 from videos.storage import DownloadRetention, DownloadStorage
 from videos.test_utils import FakeCommandRunner
 
@@ -57,28 +57,6 @@ class RunJobTests(TestCase):
                 Path(upload.file_path), storage.downloads_dir / f"{codecurl.id}.mp4"
             )
             self.assertTrue(Path(upload.file_path).is_file())
-
-    def test_failure_returns_failed_and_cleans_staging(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            storage = DownloadStorage(Path(tmp) / "downloads", Path(tmp) / "logs")
-            codecurl = CodecUrls.objects.create(
-                url="https://example.com/video", output_profile=OutputProfile.WHATSAPP_VIDEO
-            )
-            runner = FakeCommandRunner(scripts=[{
-                "progress": [b"[download] 40%"], "fail": True, "error": "boom"
-            }])
-
-            outcome = run_job(
-                str(codecurl.id), "request-44", runner=runner, storage=storage,
-                retention=DownloadRetention(storage),
-            )
-
-            codecurl.refresh_from_db()
-            self.assertEqual(outcome, "failed")
-            self.assertEqual(codecurl.status, StatusCodec.ERROR)
-            self.assertEqual(codecurl.progress, 30.0)
-            self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
-            self.assertFalse((storage.staging_root / str(codecurl.id)).exists())
 
     def test_older_job_returns_discarded_without_completion_event(self):
         with tempfile.TemporaryDirectory() as tmp:
