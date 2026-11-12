@@ -33,8 +33,7 @@ def _fetch_and_process(codecurl, profile, paths, save_progress, runner) -> str:
     """Download, post-process and return the video title."""
     destination = paths.final
     workdir = paths.workdir
-    if profile.uses_temporary_files:
-        workdir.mkdir(parents=True, exist_ok=True)
+    workdir.mkdir(parents=True, exist_ok=True)
 
     download_weight = profile.download_weight
 
@@ -63,7 +62,7 @@ def _fetch_and_process(codecurl, profile, paths, save_progress, runner) -> str:
             logger.debug(line.rstrip())
 
     source = profile.locate_source(workdir, destination)
-    if profile.uses_temporary_files:
+    if profile.post_process is not None:
         profile.post_process(
             source,
             destination,

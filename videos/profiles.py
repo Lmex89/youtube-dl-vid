@@ -27,7 +27,7 @@ class BaseDownloadProfile:
     extension: str = "mp4"
     mime_type: str = "application/octet-stream"
     download_weight: float = 1.0
-    uses_temporary_files: bool = False
+    post_process = None
 
     def build_command(
         self, url: str, destination: Path, workdir: Path
@@ -37,20 +37,8 @@ class BaseDownloadProfile:
     def locate_source(self, workdir: Path, destination: Path) -> Path:
         return destination
 
-    def post_process(
-        self,
-        source: Path,
-        destination: Path,
-        log_path: Path,
-        on_progress: Optional[ProgressCallback],
-        runner: Optional[CommandRunner] = None,
-    ) -> None:
-        shutil.move(str(source), str(destination))
 
-
-class TemporaryOutputProfile(BaseDownloadProfile):
-    uses_temporary_files = True
-
+class PostProcessedProfile(BaseDownloadProfile):
     def locate_source(self, workdir: Path, destination: Path) -> Path:
         preferred = workdir / f"source.{self.extension}"
         if preferred.exists():
@@ -79,7 +67,7 @@ class StandardVideoProfile(BaseDownloadProfile):
         ]
 
 
-class WhatsappVideoProfile(TemporaryOutputProfile):
+class WhatsappVideoProfile(PostProcessedProfile):
     name = OutputProfile.WHATSAPP_VIDEO
     extension = "mp4"
     mime_type = "video/mp4"
@@ -201,7 +189,7 @@ class WhatsappVideoProfile(TemporaryOutputProfile):
         return max(self.MIN_VIDEO_KBPS, min(video_kbps, self.MAX_VIDEO_KBPS))
 
 
-class AudioM4aProfile(TemporaryOutputProfile):
+class AudioM4aProfile(PostProcessedProfile):
     name = OutputProfile.AUDIO_M4A
     extension = "m4a"
     mime_type = "audio/mp4"
