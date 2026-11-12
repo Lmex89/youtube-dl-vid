@@ -1,6 +1,7 @@
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from django.test import TestCase
 from loguru import logger
@@ -115,6 +116,54 @@ class JobFailureAndTitleTests(TestCase):
         self.assertTrue(VideosUploaded.objects.filter(codecurl=codecurl).exists())
         self.assertFalse((self.storage.staging_root / str(codecurl.id)).exists())
         self.assertEqual(sentinel.read_text(), "keep")
+
+    def test_staging_cleanup_refusal_preserves_each_job_outcome(self):
+        for expected in ("succeeded", "failed", "discarded"):
+            with self.subTest(outcome=expected):
+                codecurl = CodecUrls.objects.create(
+                    url=f"https://example.com/{expected}",
+                    output_profile=OutputProfile.WHATSAPP_VIDEO,
+                )
+                if expected == "discarded":
+                    newer = CodecUrls.objects.create(
+                        url=codecurl.url, output_profile=codecurl.output_profile
+                    )
+                    self.assertEqual(self.run_job(newer, FakeCommandRunner()), "succeeded")
+                    newer_upload = VideosUploaded.objects.get(codecurl=newer)
+
+                scripts = [{"fail": True}] if expected == "failed" else [{}, {}, {}]
+                def refuse_removal(path, ignore_errors=False):
+                    if not ignore_errors:
+                        raise PermissionError("secret")
+
+                with patch("videos.storage.shutil.rmtree", side_effect=refuse_removal):
+                    with self.assertLogs("videos", level="ERROR") as logs:
+                        outcome = self.run_job(codecurl, FakeCommandRunner(scripts=scripts))
+
+                self.assertEqual(outcome, expected)
+                self.assertTrue((self.storage.staging_root / str(codecurl.id)).exists())
+                events = [json.loads(record.getMessage()) for record in logs.records]
+                self.assertTrue(all(event == {
+                    "event": "download_staging_cleanup_failed",
+                    "codecurl_id": str(codecurl.id),
+                    "error_type": "PermissionError",
+                    "request_id": "request-45",
+                } for event in events))
+                if expected == "discarded":
+                    self.assertFalse(CodecUrls.objects.filter(pk=codecurl.pk).exists())
+                    self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl.pk).exists())
+                    newer.refresh_from_db()
+                    self.assertEqual(newer.status, StatusCodec.SUCCESS)
+                    self.assertTrue(Path(newer_upload.file_path).is_file())
+                else:
+                    codecurl.refresh_from_db()
+                    self.assertEqual(codecurl.status, {
+                        "succeeded": StatusCodec.SUCCESS, "failed": StatusCodec.ERROR,
+                    }[expected])
+                    uploads = VideosUploaded.objects.filter(codecurl=codecurl)
+                    self.assertEqual(uploads.exists(), expected == "succeeded")
+                    if expected == "succeeded":
+                        self.assertTrue(Path(uploads.get().file_path).is_file())
 
     def test_request_deleted_during_download_is_logged_and_staging_removed(self):
         codecurl = CodecUrls.objects.create(

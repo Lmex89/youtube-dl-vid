@@ -8,7 +8,7 @@ from loguru import logger
 from videos.models import CodecUrls, StatusCodec, VideosUploaded
 from videos.process import parse_yt_dlp_progress
 from videos.profiles import get_profile
-from videos.storage import preview_url
+from videos.storage import discard_staging_safely, preview_url
 
 
 class _ProgressSaver:
@@ -167,4 +167,4 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
         _mark_failed(codecurl_id)
         return "failed"
     finally:
-        storage.discard_staging(codecurl_id)
+        discard_staging_safely(storage, codecurl_id, request_id)

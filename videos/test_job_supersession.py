@@ -1,6 +1,8 @@
 import json
+import shutil
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from django.test import TestCase
 from loguru import logger
@@ -70,6 +72,39 @@ class JobSupersessionTests(TestCase):
             )],
             [1, 1, 1, 3, 1, 1],
         )
+
+    def test_staging_cleanup_refusal_during_supersession_keeps_new_artifact(self):
+        first = CodecUrls.objects.create(
+            url="https://example.com/same", output_profile=OutputProfile.WHATSAPP_VIDEO
+        )
+        self.assertEqual(self.run_request(first), "succeeded")
+        old = self.paths(first)
+        old.workdir.mkdir(parents=True)
+        second = CodecUrls.objects.create(url=first.url, output_profile=first.output_profile)
+
+        real_rmtree = shutil.rmtree
+
+        def refuse_old_staging(path, *args, **kwargs):
+            if path == old.workdir:
+                raise PermissionError("secret")
+            return real_rmtree(path, *args, **kwargs)
+
+        with patch("videos.storage.shutil.rmtree", side_effect=refuse_old_staging):
+            with self.assertLogs("videos", level="INFO") as logs:
+                self.assertEqual(self.run_request(second), "succeeded")
+
+        self.assertFalse(CodecUrls.objects.filter(pk=first.pk).exists())
+        self.assertTrue(old.workdir.exists())
+        second.refresh_from_db()
+        self.assertEqual(second.status, StatusCodec.SUCCESS)
+        self.assertTrue(Path(VideosUploaded.objects.get(codecurl=second).file_path).is_file())
+        events = [json.loads(record.getMessage()) for record in logs.records]
+        failure = next(event for event in events if event["event"] == "download_staging_cleanup_failed")
+        self.assertEqual(failure["codecurl_id"], str(first.id))
+        self.assertEqual(failure["request_id"], "request-46")
+        self.assertNotIn("secret", str(events))
+        superseded = next(event for event in events if event["event"] == "download_superseded")
+        self.assertEqual(superseded["staging_dirs_deleted"], 0)
 
     def test_failed_attempt_is_kept_as_history_after_success(self):
         failed = CodecUrls.objects.create(url="https://example.com/same")
