@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -10,7 +13,7 @@ from unittest.mock import patch
 from loguru import logger as loguru_logger
 from django.core.cache import caches
 from django.core.management import call_command
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -33,6 +36,61 @@ from videos.storage import (
     DownloadStorage,
     OrphanCounts,
 )
+
+
+class EnvironmentSettingsTests(SimpleTestCase):
+    def run_check(self, overrides):
+        env = os.environ.copy()
+        env.pop("DJANGO_SETTINGS_MODULE", None)
+        env.update(
+            SECRET_KEY="test-secret", DB_NAME="testdb", DB_USER="testuser",
+            DB_PASSWORD="testpassword", DB_HOST="db", DB_PORT="5432",
+        )
+        for name, value in overrides.items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
+        return subprocess.run(
+            [sys.executable, "manage.py", "check"],
+            cwd=Path(__file__).resolve().parent.parent,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_missing_or_empty_secrets_stop_startup(self):
+        for name in ("SECRET_KEY", "DB_PASSWORD"):
+            for value in (None, ""):
+                with self.subTest(name=name, value=value):
+                    result = self.run_check({name: value})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(name, result.stderr)
+
+    def test_complete_environment_passes_system_check(self):
+        result = self.run_check({})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_database_settings_use_environment_and_host_port_defaults(self):
+        env = os.environ.copy()
+        env.pop("DJANGO_SETTINGS_MODULE", None)
+        env.pop("DB_HOST", None)
+        env.pop("DB_PORT", None)
+        env.update(
+            SECRET_KEY="test-secret", DB_NAME="testdb", DB_USER="testuser",
+            DB_PASSWORD="testpassword",
+        )
+        result = subprocess.run(
+            [sys.executable, "manage.py", "shell", "-c",
+             "from django.conf import settings; "
+             "assert {k: settings.DATABASES['default'][k] for k in "
+             "('NAME', 'USER', 'PASSWORD', 'HOST', 'PORT')} == "
+             "{'NAME': 'testdb', 'USER': 'testuser', 'PASSWORD': 'testpassword', "
+             "'HOST': 'db', 'PORT': '5432'}"],
+            cwd=Path(__file__).resolve().parent.parent,
+            env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class ProgressParserTests(TestCase):
