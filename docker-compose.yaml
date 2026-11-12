@@ -8,14 +8,15 @@ services:
     ports:
       - 0.0.0.0:51432:5432/tcp
     environment:
-      - POSTGRES_DB=youtube_project
-      - POSTGRES_USER=lmex
-      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=${DB_NAME}
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required}
       - TZ=America/Mexico_City
 
   web:
     build: .
     restart: unless-stopped
+    env_file: .env
     #command: bash -c "gunicorn bookproject.wsgi:application --timeout 120 --workers=3 --threads=3 --worker-connections=1000 --bind 0.0.0.0:8000 "
     #command: "python manage.py runserver"
     entrypoint: ["sh","docker-entrypoint.sh"]
@@ -25,9 +26,11 @@ services:
       - 8011:8000
     environment:
       - DJANGO_SETTINGS_MODULE=Youtube_dl_vid.settings
-      - POSTGRES_NAME=postgres
-      - POSTGRES_USER=lmex
-      - POSTGRES_PASSWORD=postgres
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required}
+      - DB_HOST=${DB_HOST:-db}
+      - DB_PORT=${DB_PORT:-5432}
       - TZ=America/Mexico_City
     depends_on:
       - db
