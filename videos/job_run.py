@@ -11,12 +11,15 @@ from videos.profiles import get_profile
 from videos.storage import preview_url
 
 
-class ProgressSaver:
+class _ProgressSaver:
     """Clamp to 0-100, never go backwards, and write only on >= min_step gains."""
 
-    def __init__(self, codecurl_id: str, min_step: float = 1.0):
+    def __init__(
+        self, codecurl_id: str, min_step: float = 1.0, download_weight: float = 1.0
+    ):
         self.codecurl_id = codecurl_id
         self.min_step = min_step
+        self.download_weight = download_weight
         self.last = 0.0  # start_download_async resets stored progress to 0
 
     def __call__(self, percent: float) -> None:
@@ -28,21 +31,19 @@ class ProgressSaver:
             progress=value, updated_at=timezone.now()
         )
 
+    def download(self, percent: float) -> None:
+        self(percent * self.download_weight)
 
-def _fetch_and_process(codecurl, profile, paths, save_progress, runner) -> str:
+    def post_process(self, percent: float) -> None:
+        base = self.download_weight * 100
+        self(base + percent * (100 - base) / 100)
+
+
+def _fetch_and_process(codecurl, profile, paths, progress, runner) -> str:
     """Download, post-process and return the video title."""
     destination = paths.final
     workdir = paths.workdir
     workdir.mkdir(parents=True, exist_ok=True)
-
-    download_weight = profile.download_weight
-
-    def on_download_progress(percent: float) -> None:
-        save_progress(percent * download_weight)
-
-    def on_process_progress(percent: float) -> None:
-        base = download_weight * 100
-        save_progress(base + percent * (100 - base) / 100)
 
     title_path = paths.title_log
     title_path.unlink(missing_ok=True)
@@ -53,7 +54,7 @@ def _fetch_and_process(codecurl, profile, paths, save_progress, runner) -> str:
         paths.log,
         label="yt_dlp",
         timeout=settings.MEDIA_PROCESS_TIMEOUT,
-        progress_callback=on_download_progress,
+        progress_callback=progress.download,
         progress_parser=parse_yt_dlp_progress,
     )
 
@@ -67,9 +68,10 @@ def _fetch_and_process(codecurl, profile, paths, save_progress, runner) -> str:
             source,
             destination,
             paths.process_log,
-            on_process_progress,
+            progress.post_process,
             runner=runner,
         )
+        progress.post_process(100.0)
 
     title = (
         title_path.read_text(errors="replace").strip()
@@ -103,11 +105,10 @@ def _mark_failed(codecurl_id: str) -> None:
 
 def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) -> str:
     """Run one download synchronously and return succeeded, failed or discarded."""
-    save_progress = ProgressSaver(codecurl_id)
-
     try:
         codecurl = CodecUrls.objects.get(pk=codecurl_id)
         profile = get_profile(codecurl.output_profile)
+        progress = _ProgressSaver(codecurl_id, download_weight=profile.download_weight)
         paths = storage.job_paths(codecurl_id, profile)
         destination = paths.final
 
@@ -121,7 +122,7 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
             })
         )
 
-        title = _fetch_and_process(codecurl, profile, paths, save_progress, runner)
+        title = _fetch_and_process(codecurl, profile, paths, progress, runner)
         codecurl = _record_success(codecurl_id, profile, destination, title)
 
         discarded = False

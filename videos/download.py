@@ -6,7 +6,7 @@ from typing import Optional
 from django.db import close_old_connections
 from loguru import logger
 
-from videos.job_run import ProgressSaver, run_job
+from videos.job_run import run_job
 from videos.models import CodecUrls, StatusCodec
 from videos.runner import get_command_runner
 from videos.storage import DownloadRetention, DownloadStorage

@@ -217,8 +217,6 @@ class AudioM4aProfile(PostProcessedProfile):
         runner: Optional[CommandRunner] = None,
     ) -> None:
         shutil.move(str(source), str(destination))
-        if on_progress:
-            on_progress(100.0)
 
 
 PROFILES: Dict[str, BaseDownloadProfile] = {

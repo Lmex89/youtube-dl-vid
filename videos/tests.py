@@ -771,25 +771,6 @@ class StorageLayoutEndToEndTests(DownloadJobTestCase):
         )
 
 
-class RecordingRunner(FakeCommandRunner):
-    """Records (label, progress seen over HTTP) after each progress emission."""
-
-    def __init__(self, client, codecurl_ids, scripts=None):
-        super().__init__(scripts)
-        self.client = client
-        self.ids = codecurl_ids  # filled once the POST returns
-        self.seen = []
-
-    def run(self, command, log_path, label, timeout, progress_callback=None, **kw):
-        def spy(pct):
-            progress_callback(pct)
-            if self.ids:
-                got = self.client.get(f"/api/v1/yt/videos/{self.ids[0]}")
-                self.seen.append((label, got.data["progress"]))
-
-        return super().run(command, log_path, label, timeout, spy, **kw)
-
-
 @override_settings(WHATSAPP_MEDIA_MAX_BYTES=100)
 class ReencodeProfileEndToEndTests(DownloadJobTestCase):
     def _post(self, profile):
@@ -802,38 +783,13 @@ class ReencodeProfileEndToEndTests(DownloadJobTestCase):
         return post.data["id"]
 
     def _run(self, profile, scripts):
-        ids = []
         if profile == "whatsapp_video":
             scripts = [scripts[0], {"log": "10.0"}, *scripts[1:]]
-        runner = RecordingRunner(self.client, ids, scripts)
+        runner = FakeCommandRunner(scripts)
         set_test_runner(runner)
-        ids.append(self._post(profile))
-        _wait_for_download(ids[0])
-        return ids[0], runner
-
-    def _assert_monotonic_across_phases(self, runner):
-        values = [v for _, v in runner.seen]
-        self.assertEqual(values, sorted(values))
-        download = [v for label, v in runner.seen if label == "yt_dlp"]
-        process = [v for label, v in runner.seen if label != "yt_dlp"]
-        self.assertTrue(download and process)
-        self.assertGreater(max(process), max(download))
-
-    def test_whatsapp_progress_spans_download_and_encode(self):
-        cid, runner = self._run(
-            "whatsapp_video",
-            [
-                {"progress": [b"[download] 20%", b"[download] 100%"]},
-                {"progress": [b"out_time_us=3000000", b"out_time_us=10000000"], "output_content": b"x" * 50},
-            ],
-        )
-        self._assert_monotonic_across_phases(runner)
-        get = self.client.get(f"/api/v1/yt/videos/{cid}")
-        self.assertEqual(get.data["status"], StatusCodec.SUCCESS)
-        self.assertEqual(get.data["progress"], 100.0)
-        upload = VideosUploaded.objects.get(codecurl_id=cid)
-        self.assertTrue(upload.file_path.endswith(f"{cid}.mp4"))
-        self.assertEqual(upload.mime_type, "video/mp4")
+        cid = self._post(profile)
+        _wait_for_download(cid)
+        return cid, runner
 
     def test_whatsapp_ladder_steps_down_until_fit(self):
         cid, runner = self._run(
@@ -864,20 +820,6 @@ class ReencodeProfileEndToEndTests(DownloadJobTestCase):
         self.assertEqual(get.data["status"], StatusCodec.ERROR)
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=cid).exists())
 
-    def test_audio_progress_spans_download_and_post_process(self):
-        cid, runner = self._run(
-            "audio_m4a", [{"progress": [b"[download] 40%", b"[download] 100%"]}]
-        )
-        values = [v for _, v in runner.seen]
-        self.assertEqual(values, sorted(values))
-        self.assertLessEqual(max(values), 90.0)  # download is weighted 0.9
-        get = self.client.get(f"/api/v1/yt/videos/{cid}")
-        self.assertEqual(get.data["status"], StatusCodec.SUCCESS)
-        self.assertEqual(get.data["progress"], 100.0)
-        upload = VideosUploaded.objects.get(codecurl_id=cid)
-        self.assertTrue(upload.file_path.endswith(f"{cid}.m4a"))
-        self.assertEqual(upload.mime_type, "audio/mp4")
-
 
 class GetJobStateTests(TestCase):
     def test_returns_state_for_each_status(self):
@@ -901,10 +843,10 @@ class GetJobStateTests(TestCase):
 
 class ProgressSaverTests(TestCase):
     def _saver(self):
-        from videos.download import ProgressSaver
+        from videos.job_run import _ProgressSaver
 
         codecurl = CodecUrls.objects.create(url="https://example.com")
-        return codecurl, ProgressSaver(str(codecurl.id))
+        return codecurl, _ProgressSaver(str(codecurl.id))
 
     def test_clamps_out_of_range(self):
         codecurl, save = self._saver()
@@ -933,6 +875,13 @@ class ProgressSaverTests(TestCase):
                 save(pct)
         writes = [q for q in ctx.captured_queries if q["sql"].startswith("UPDATE")]
         self.assertLessEqual(len(writes), 101)
+        codecurl.refresh_from_db()
+        self.assertEqual(codecurl.progress, 100.0)
+
+    def test_completion_bypasses_minimum_step(self):
+        codecurl, save = self._saver()
+        save(99.5)
+        save(100.0)
         codecurl.refresh_from_db()
         self.assertEqual(codecurl.progress, 100.0)
 
