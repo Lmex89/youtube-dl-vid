@@ -12,7 +12,7 @@ docker compose up --build
 
 - Web at `http://localhost:8011`, PostgreSQL at `localhost:51432`
 - Compose loads `.env` for both services and maps `DB_*` to Postgres variables;
-  Django requires non-empty `SECRET_KEY` and `DB_PASSWORD`. DB host defaults to
+  Django requires non-empty `SECRET_KEY`, `DB_NAME`, `DB_USER` and `DB_PASSWORD`. DB host defaults to
   `db` inside the container (not `localhost`).
 - Preserve the current DB name, user and password for an existing volume;
   changing `.env` does not change PostgreSQL credentials. See README

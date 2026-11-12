@@ -77,16 +77,16 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "Youtube_dl_vid.wsgi.application"
 
-DB_PASSWORD = os.environ.get("DB_PASSWORD")
-if not DB_PASSWORD:
-    raise ImproperlyConfigured("DB_PASSWORD environment variable is required")
+for _name in ("DB_NAME", "DB_USER", "DB_PASSWORD"):
+    if not os.environ.get(_name):
+        raise ImproperlyConfigured(f"{_name} environment variable is required")
 
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.environ.get("DB_NAME", ""),
-        "USER": os.environ.get("DB_USER", ""),
-        "PASSWORD": DB_PASSWORD,
+        "NAME": os.environ["DB_NAME"],
+        "USER": os.environ["DB_USER"],
+        "PASSWORD": os.environ["DB_PASSWORD"],
         "HOST": os.environ.get("DB_HOST", "db"),
         "PORT": os.environ.get("DB_PORT", "5432"),
     }

@@ -325,13 +325,13 @@ image's `POSTGRES_*` variables. Django reads the same database values.
 | Variable | Default in Django | Purpose |
 |---|---|---|
 | `SECRET_KEY` | None | Required, non-empty Django signing key |
-| `DB_NAME` | Empty | Database name; set it to the existing or new database name |
-| `DB_USER` | Empty | Database user; set it to the existing or new role |
+| `DB_NAME` | None | Required, non-empty database name; set it to the existing or new database name |
+| `DB_USER` | None | Required, non-empty database user; set it to the existing or new role |
 | `DB_PASSWORD` | None | Required, non-empty database password |
 | `DB_HOST` | `db` | Database host from the web container |
 | `DB_PORT` | `5432` | Database port from the web container |
 
-An absent or empty `SECRET_KEY` or `DB_PASSWORD` stops Django at startup with a
+An absent or empty `SECRET_KEY`, `DB_NAME`, `DB_USER` or `DB_PASSWORD` stops Django at startup with a
 configuration error naming the missing variable; Compose also rejects a missing
 or empty `DB_PASSWORD`. `DJANGO_SETTINGS_MODULE` and `TZ` are set in Compose.
 
