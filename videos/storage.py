@@ -90,7 +90,7 @@ class DownloadStorage:
         codecurl_id = str(codecurl_id)
         workdir = (
             self.staging_root / codecurl_id
-            if profile.uses_temporary_files
+            if profile.has_post_process
             else self.downloads_dir
         )
         return JobPaths(
@@ -150,9 +150,22 @@ class DownloadStorage:
             and not staging_dir.is_symlink()
             and staging_dir.is_dir()
         ):
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            shutil.rmtree(staging_dir)
             return True
         return False
+
+    def discard_staging_safely(self, codecurl_id: str, request_id: str) -> bool:
+        """Like discard_staging, but log a refusal instead of raising."""
+        try:
+            return self.discard_staging(codecurl_id)
+        except Exception as exc:
+            logger.error(json.dumps({
+                "event": "download_staging_cleanup_failed",
+                "codecurl_id": str(codecurl_id),
+                "error_type": exc.__class__.__name__,
+                "request_id": request_id,
+            }))
+            return False
 
 
 class DownloadRetention:
@@ -207,7 +220,7 @@ class DownloadRetention:
             return False
         return self._delete_file(path)
 
-    def _remove_job(self, old_id, profile, counts: SupersedeCounts) -> None:
+    def _remove_job(self, old_id, profile, counts: SupersedeCounts, request_id: str) -> None:
         old_codecurl = CodecUrls.objects.filter(pk=old_id).first()
         paths = self.storage.job_paths(str(old_id), profile)
 
@@ -224,7 +237,7 @@ class DownloadRetention:
         if self._delete_file(paths.final):
             counts.files_deleted += 1
 
-        if self.storage.discard_staging(str(old_id)):
+        if self.storage.discard_staging_safely(str(old_id), request_id):
             counts.staging_dirs_deleted += 1
 
         for log_path in (paths.log, paths.process_log, paths.title_log):
@@ -247,7 +260,7 @@ class DownloadRetention:
 
         profile = get_profile(codecurl.output_profile)
         for old_id in superseded:
-            self._remove_job(old_id, profile, counts)
+            self._remove_job(old_id, profile, counts, request_id)
 
         logger.info(
             json.dumps({
@@ -280,7 +293,7 @@ class DownloadRetention:
 
         counts = SupersedeCounts()
         self._remove_job(
-            codecurl.pk, get_profile(codecurl.output_profile), counts
+            codecurl.pk, get_profile(codecurl.output_profile), counts, request_id
         )
         logger.info(
             json.dumps({
