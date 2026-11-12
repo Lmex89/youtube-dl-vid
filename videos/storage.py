@@ -90,7 +90,7 @@ class DownloadStorage:
         codecurl_id = str(codecurl_id)
         workdir = (
             self.staging_root / codecurl_id
-            if profile.uses_temporary_files
+            if profile.post_process is not None
             else self.downloads_dir
         )
         return JobPaths(
