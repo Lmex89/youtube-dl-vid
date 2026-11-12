@@ -1,4 +1,5 @@
 import json
+from enum import StrEnum
 from pathlib import Path
 
 from django.conf import settings
@@ -8,7 +9,13 @@ from loguru import logger
 from videos.models import CodecUrls, StatusCodec, VideosUploaded
 from videos.process import parse_yt_dlp_progress
 from videos.profiles import get_profile
-from videos.storage import discard_staging_safely, preview_url
+from videos.storage import preview_url
+
+
+class JobOutcome(StrEnum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    DISCARDED = "discarded"
 
 
 class _ProgressSaver:
@@ -43,7 +50,8 @@ def _fetch_and_process(codecurl, profile, paths, progress, runner) -> str:
     """Download, post-process and return the video title."""
     destination = paths.final
     workdir = paths.workdir
-    workdir.mkdir(parents=True, exist_ok=True)
+    if profile.has_post_process:
+        workdir.mkdir(parents=True, exist_ok=True)
 
     title_path = paths.title_log
     title_path.unlink(missing_ok=True)
@@ -59,7 +67,7 @@ def _fetch_and_process(codecurl, profile, paths, progress, runner) -> str:
     )
 
     source = profile.locate_source(workdir, destination)
-    if profile.post_process is not None:
+    if profile.has_post_process:
         profile.post_process(
             source,
             destination,
@@ -99,7 +107,7 @@ def _mark_failed(codecurl_id: str) -> None:
         codecurl.save(update_fields=["status", "updated_at"])
 
 
-def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) -> str:
+def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) -> JobOutcome:
     """Run one download synchronously and return succeeded, failed or discarded."""
     try:
         codecurl = CodecUrls.objects.get(pk=codecurl_id)
@@ -149,7 +157,7 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
                     "request_id": request_id,
                 })
             )
-        return "discarded" if discarded else "succeeded"
+        return JobOutcome.DISCARDED if discarded else JobOutcome.SUCCEEDED
     except Exception as exc:
         logger.error(
             json.dumps({
@@ -161,6 +169,6 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
             })
         )
         _mark_failed(codecurl_id)
-        return "failed"
+        return JobOutcome.FAILED
     finally:
-        discard_staging_safely(storage, codecurl_id, request_id)
+        storage.discard_staging_safely(codecurl_id, request_id)

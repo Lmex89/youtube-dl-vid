@@ -90,7 +90,7 @@ class DownloadStorage:
         codecurl_id = str(codecurl_id)
         workdir = (
             self.staging_root / codecurl_id
-            if profile.post_process is not None
+            if profile.has_post_process
             else self.downloads_dir
         )
         return JobPaths(
@@ -154,18 +154,18 @@ class DownloadStorage:
             return True
         return False
 
-
-def discard_staging_safely(storage, codecurl_id: str, request_id: str) -> bool:
-    try:
-        return storage.discard_staging(codecurl_id)
-    except Exception as exc:
-        logger.error(json.dumps({
-            "event": "download_staging_cleanup_failed",
-            "codecurl_id": str(codecurl_id),
-            "error_type": exc.__class__.__name__,
-            "request_id": request_id,
-        }))
-        return False
+    def discard_staging_safely(self, codecurl_id: str, request_id: str) -> bool:
+        """Like discard_staging, but log a refusal instead of raising."""
+        try:
+            return self.discard_staging(codecurl_id)
+        except Exception as exc:
+            logger.error(json.dumps({
+                "event": "download_staging_cleanup_failed",
+                "codecurl_id": str(codecurl_id),
+                "error_type": exc.__class__.__name__,
+                "request_id": request_id,
+            }))
+            return False
 
 
 class DownloadRetention:
@@ -237,7 +237,7 @@ class DownloadRetention:
         if self._delete_file(paths.final):
             counts.files_deleted += 1
 
-        if discard_staging_safely(self.storage, str(old_id), request_id):
+        if self.storage.discard_staging_safely(str(old_id), request_id):
             counts.staging_dirs_deleted += 1
 
         for log_path in (paths.log, paths.process_log, paths.title_log):

@@ -13,12 +13,14 @@ from videos.test_utils import FakeCommandRunner
 class ProfileStepTests(SimpleTestCase):
     def test_registry_exposes_optional_post_process_step(self):
         self.assertIsNone(get_profile(OutputProfile.STANDARD_VIDEO).post_process)
+        self.assertFalse(get_profile(OutputProfile.STANDARD_VIDEO).has_post_process)
         for name in OutputProfile.values:
             with self.subTest(profile=name):
                 self.assertFalse(hasattr(get_profile(name), "uses_temporary_files"))
         for name in (OutputProfile.WHATSAPP_VIDEO, OutputProfile.AUDIO_M4A):
             with self.subTest(profile=name):
                 self.assertTrue(callable(get_profile(name).post_process))
+                self.assertTrue(get_profile(name).has_post_process)
 
     def test_commands_use_paths_selected_for_each_profile(self):
         storage = DownloadStorage(Path("/downloads"), Path("/logs"))

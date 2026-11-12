@@ -29,6 +29,10 @@ class BaseDownloadProfile:
     download_weight: float = 1.0
     post_process = None
 
+    @property
+    def has_post_process(self) -> bool:
+        return self.post_process is not None
+
     def build_command(
         self, url: str, destination: Path, workdir: Path
     ) -> List[str]:
@@ -38,7 +42,7 @@ class BaseDownloadProfile:
         return destination
 
 
-class PostProcessedProfile(BaseDownloadProfile):
+class StagedProfile(BaseDownloadProfile):
     def locate_source(self, workdir: Path, destination: Path) -> Path:
         preferred = workdir / f"source.{self.extension}"
         if preferred.exists():
@@ -67,7 +71,7 @@ class StandardVideoProfile(BaseDownloadProfile):
         ]
 
 
-class WhatsappVideoProfile(PostProcessedProfile):
+class WhatsappVideoProfile(StagedProfile):
     name = OutputProfile.WHATSAPP_VIDEO
     extension = "mp4"
     mime_type = "video/mp4"
@@ -189,7 +193,7 @@ class WhatsappVideoProfile(PostProcessedProfile):
         return max(self.MIN_VIDEO_KBPS, min(video_kbps, self.MAX_VIDEO_KBPS))
 
 
-class AudioM4aProfile(PostProcessedProfile):
+class AudioM4aProfile(StagedProfile):
     name = OutputProfile.AUDIO_M4A
     extension = "m4a"
     mime_type = "audio/mp4"
