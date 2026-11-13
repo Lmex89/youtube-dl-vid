@@ -183,6 +183,37 @@ class JobSupersessionTests(TestCase):
         self.assertEqual(later_paths.log.read_text(), "later log")
         self.assertTrue(VideosUploaded.objects.filter(codecurl=current).exists())
 
+    def test_equal_timestamps_do_not_supersede_either_success(self):
+        current = CodecUrls.objects.create(url="https://example.com/same")
+        equal = CodecUrls.objects.create(url=current.url, status=StatusCodec.SUCCESS)
+        CodecUrls.objects.filter(pk=equal.pk).update(created_at=current.created_at)
+
+        self.assertEqual(self.run_request(current), "succeeded")
+
+        current.refresh_from_db()
+        equal.refresh_from_db()
+        self.assertEqual(current.status, StatusCodec.SUCCESS)
+        self.assertEqual(equal.status, StatusCodec.SUCCESS)
+        self.assertTrue(VideosUploaded.objects.filter(codecurl=current).exists())
+        self.assertTrue(self.paths(current).final.is_file())
+
+    def test_newer_failure_and_unrelated_successes_do_not_discard_job(self):
+        current = CodecUrls.objects.create(url="https://example.com/same")
+        failed = CodecUrls.objects.create(url=current.url, status=StatusCodec.ERROR)
+        other_url = CodecUrls.objects.create(
+            url="https://example.com/other", status=StatusCodec.SUCCESS
+        )
+        other_profile = CodecUrls.objects.create(
+            url=current.url, output_profile=OutputProfile.AUDIO_M4A, status=StatusCodec.SUCCESS
+        )
+
+        self.assertEqual(self.run_request(current), "succeeded")
+
+        for request in (current, failed, other_url, other_profile):
+            self.assertTrue(CodecUrls.objects.filter(pk=request.pk).exists())
+        self.assertTrue(VideosUploaded.objects.filter(codecurl=current).exists())
+        self.assertTrue(self.paths(current).final.is_file())
+
     def test_out_of_order_job_is_discarded_without_completion_event(self):
         older = CodecUrls.objects.create(
             url="https://example.com/same", output_profile=OutputProfile.WHATSAPP_VIDEO

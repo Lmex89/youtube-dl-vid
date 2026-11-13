@@ -5,7 +5,8 @@ from django.db import close_old_connections
 from loguru import logger
 
 from videos.job_run import run_job
-from videos.models import CodecUrls, StatusCodec
+from videos.lifecycle import pending_requests, start
+from videos.models import CodecUrls
 from videos.runner import get_command_runner
 from videos.storage import DownloadRetention, DownloadStorage
 
@@ -17,9 +18,7 @@ def stale_pending_jobs():
     """Pendiente jobs with no live thread, e.g. orphaned by a restart."""
     with _threads_lock:
         running = list(_download_threads)
-    return CodecUrls.objects.filter(status=StatusCodec.PENDING).exclude(
-        pk__in=running
-    )
+    return pending_requests().exclude(pk__in=running)
 
 
 def is_download_running(codecurl_id: str) -> bool:
@@ -52,9 +51,7 @@ def start_download_async(codecurl: CodecUrls, request_id: str = "unknown") -> Co
             return codecurl
         # Register last so a failed save/start never leaves a stale entry;
         # the worker's cleanup waits on this lock, so it can't pop early.
-        codecurl.status = StatusCodec.PENDING
-        codecurl.progress = 0.0
-        codecurl.save(update_fields=["status", "progress", "updated_at"])
+        start(codecurl)
         thread.start()
         _download_threads[codecurl_id] = thread
     return codecurl

@@ -10,7 +10,8 @@ from typing import Callable, Optional
 
 from django.conf import settings
 
-from videos.models import CodecUrls, StatusCodec, VideosUploaded
+from videos.lifecycle import is_successful, successful_requests
+from videos.models import CodecUrls, VideosUploaded
 from videos.profiles import BaseDownloadProfile, get_profile
 
 STAGING_DIR_NAME = ".tmp"
@@ -230,7 +231,7 @@ class DownloadRetention:
             upload.delete()
             counts.uploads_deleted += 1
 
-        if old_codecurl and old_codecurl.status == StatusCodec.SUCCESS:
+        if old_codecurl and is_successful(old_codecurl):
             old_codecurl.delete()
             counts.codecurls_deleted += 1
 
@@ -282,11 +283,12 @@ class DownloadRetention:
         Newest wins: a slow older job finishing after a newer successful one
         for the same URL and profile must not leave a file or row behind.
         """
-        newer_success = CodecUrls.objects.filter(
-            url=codecurl.url,
-            output_profile=codecurl.output_profile,
-            created_at__gt=codecurl.created_at,
-            status=StatusCodec.SUCCESS,
+        newer_success = successful_requests(
+            CodecUrls.objects.filter(
+                url=codecurl.url,
+                output_profile=codecurl.output_profile,
+                created_at__gt=codecurl.created_at,
+            )
         ).exists()
         if not newer_success:
             return False
