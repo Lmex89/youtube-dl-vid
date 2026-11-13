@@ -1,6 +1,9 @@
+from pathlib import Path
+
+from django.db import transaction
 from django.utils import timezone
 
-from videos.models import CodecUrls
+from videos.models import CodecUrls, StatusCodec, VideosUploaded
 
 
 class ProgressReporter:
@@ -30,3 +33,25 @@ class ProgressReporter:
     def post_process(self, percent: float) -> None:
         base = self.download_weight * 100
         self(base + percent * (100 - base) / 100)
+
+
+@transaction.atomic
+def record_success(codecurl_id: str, profile, destination: Path, title: str) -> CodecUrls:
+    codecurl = CodecUrls.objects.get(pk=codecurl_id)
+    VideosUploaded.objects.create(
+        file_path=str(destination),
+        mime_type=profile.mime_type,
+        title=title[:250],
+        codecurl=codecurl,
+    )
+    codecurl.status = StatusCodec.SUCCESS
+    codecurl.progress = 100.0
+    codecurl.save(update_fields=["status", "progress", "updated_at"])
+    return codecurl
+
+
+def mark_failed(codecurl_id: str) -> None:
+    codecurl = CodecUrls.objects.filter(pk=codecurl_id).first()
+    if codecurl:
+        codecurl.status = StatusCodec.ERROR
+        codecurl.save(update_fields=["status", "updated_at"])

@@ -1,12 +1,11 @@
 import json
 from enum import StrEnum
-from pathlib import Path
 
 from django.conf import settings
 from loguru import logger
 
-from videos.lifecycle import ProgressReporter
-from videos.models import CodecUrls, StatusCodec, VideosUploaded
+from videos.lifecycle import ProgressReporter, mark_failed, record_success
+from videos.models import CodecUrls
 from videos.process import parse_yt_dlp_progress
 from videos.profiles import get_profile
 from videos.storage import preview_url
@@ -58,27 +57,6 @@ def _fetch_and_process(codecurl, profile, paths, progress, runner) -> str:
     return title
 
 
-def _record_success(codecurl_id: str, profile, destination: Path, title: str) -> CodecUrls:
-    codecurl = CodecUrls.objects.get(pk=codecurl_id)
-    VideosUploaded.objects.create(
-        file_path=str(destination),
-        mime_type=profile.mime_type,
-        title=title[:250],
-        codecurl=codecurl,
-    )
-    codecurl.status = StatusCodec.SUCCESS
-    codecurl.progress = 100.0
-    codecurl.save(update_fields=["status", "progress", "updated_at"])
-    return codecurl
-
-
-def _mark_failed(codecurl_id: str) -> None:
-    codecurl = CodecUrls.objects.filter(pk=codecurl_id).first()
-    if codecurl:
-        codecurl.status = StatusCodec.ERROR
-        codecurl.save(update_fields=["status", "updated_at"])
-
-
 def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) -> JobOutcome:
     """Run one download synchronously and return succeeded, failed or discarded."""
     try:
@@ -99,7 +77,7 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
         )
 
         title = _fetch_and_process(codecurl, profile, paths, progress, runner)
-        codecurl = _record_success(codecurl_id, profile, destination, title)
+        codecurl = record_success(codecurl_id, profile, destination, title)
 
         discarded = False
         try:
@@ -140,7 +118,7 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
                 "request_id": request_id,
             })
         )
-        _mark_failed(codecurl_id)
+        mark_failed(codecurl_id)
         return JobOutcome.FAILED
     finally:
         storage.discard_staging_safely(codecurl_id, request_id)
