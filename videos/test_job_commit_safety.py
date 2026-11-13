@@ -372,6 +372,16 @@ class JobCommitSafetyTests(TransactionTestCase):
                 if not locked.wait(5) or errors:
                     raise RuntimeError("success transaction did not acquire row lock")
 
+        lock_errors = []
+
+        def capture_lock_error(execute, sql, params, many, context):
+            try:
+                return execute(sql, params, many, context)
+            except OperationalError as exc:
+                if "FOR UPDATE" in sql:
+                    lock_errors.append(exc)
+                raise
+
         messages = []
         sink = logger.add(
             messages.append, level="ERROR",
@@ -382,12 +392,13 @@ class JobCommitSafetyTests(TransactionTestCase):
             cursor.execute("SHOW lock_timeout")
             original_timeout = cursor.fetchone()[0]
         try:
-            with patch.object(connection, "commit", side_effect=fail_first_commit):
-                with patch.object(connection, "rollback", side_effect=rollback_then_hold_row):
-                    with self.assertLogs("videos", level="ERROR") as logs:
-                        started = time.monotonic()
-                        outcome = self.run_job(codecurl)
-                        elapsed = time.monotonic() - started
+            with connection.execute_wrapper(capture_lock_error):
+                with patch.object(connection, "commit", side_effect=fail_first_commit):
+                    with patch.object(connection, "rollback", side_effect=rollback_then_hold_row):
+                        with self.assertLogs("videos", level="ERROR") as logs:
+                            started = time.monotonic()
+                            outcome = self.run_job(codecurl)
+                            elapsed = time.monotonic() - started
             locked_on_return = holder.is_alive()
             file_on_return = final.is_file()
         finally:
@@ -397,6 +408,8 @@ class JobCommitSafetyTests(TransactionTestCase):
 
         self.assertFalse(holder.is_alive())
         self.assertEqual(errors, [])
+        self.assertEqual(len(lock_errors), 1)
+        self.assertEqual(lock_errors[0].__cause__.sqlstate, "55P03")
         self.assertTrue(locked_on_return)
         self.assertLess(elapsed, 5)
         self.assertEqual(outcome, "failed")
