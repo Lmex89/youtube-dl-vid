@@ -83,47 +83,52 @@ class JobFailureAndTitleTests(TestCase):
         self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
 
     def test_failed_success_write_rolls_back_upload_and_marks_error(self):
-        codecurl = CodecUrls.objects.create(
-            url="https://example.com/video", output_profile=OutputProfile.WHATSAPP_VIDEO
-        )
-        staging = self.storage.staging_root / str(codecurl.id)
         messages = []
         sink = logger.add(
             messages.append, level="INFO",
             filter=lambda record: record["name"] == "videos.job_run",
         )
         self.addCleanup(logger.remove, sink)
-        saw_upload = []
+        for profile, extension in [
+            (OutputProfile.WHATSAPP_VIDEO, "mp4"), (OutputProfile.AUDIO_M4A, "m4a"),
+        ]:
+            with self.subTest(profile=profile):
+                messages.clear()
+                codecurl = CodecUrls.objects.create(
+                    url="https://example.com/video", output_profile=profile
+                )
+                staging = self.storage.staging_root / str(codecurl.id)
+                saw_upload = []
 
-        def fail_success_write(execute, sql, params, many, context):
-            if (sql.startswith('UPDATE "videos_codecurls"')
-                    and '"status"' in sql and '"progress"' in sql):
-                saw_upload.append(VideosUploaded.objects.filter(codecurl=codecurl).exists())
-                return execute("SELECT * FROM nonexistent_success_write_table", None, many, context)
-            return execute(sql, params, many, context)
+                def fail_success_write(execute, sql, params, many, context):
+                    if (sql.startswith('UPDATE "videos_codecurls"')
+                            and '"status"' in sql and '"progress"' in sql):
+                        saw_upload.append(VideosUploaded.objects.filter(codecurl=codecurl).exists())
+                        return execute("SELECT * FROM nonexistent_success_write_table", None, many, context)
+                    return execute(sql, params, many, context)
 
-        with connection.execute_wrapper(fail_success_write):
-            outcome = self.run_job(codecurl, FakeCommandRunner(scripts=[
-                {"progress": [b"[download] 100%"]}, {"log": "10.0"}, {},
-            ]))
+                with connection.execute_wrapper(fail_success_write):
+                    outcome = self.run_job(codecurl, FakeCommandRunner(scripts=[
+                        {"progress": [b"[download] 100%"]}, {"log": "10.0"}, {},
+                    ]))
 
-        codecurl.refresh_from_db()
-        self.assertEqual(saw_upload, [True])
-        self.assertEqual(outcome, "failed")
-        self.assertEqual(codecurl.status, StatusCodec.ERROR)
-        self.assertLess(codecurl.progress, 100.0)
-        self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
-        self.assertFalse(staging.exists())
-        self.assertTrue((self.storage.downloads_dir / f"{codecurl.id}.mp4").is_file())
-        events = [json.loads(message.record["message"]) for message in messages]
-        self.assertEqual([event["event"] for event in events], [
-            "download_pipeline_started", "video_download_failed",
-        ])
-        self.assertEqual(events[-1]["codecurl_id"], str(codecurl.id))
-        self.assertEqual(events[-1]["request_id"], "request-45")
-        self.assertEqual(set(events[-1]), {
-            "event", "codecurl_id", "error", "error_type", "request_id",
-        })
+                codecurl.refresh_from_db()
+                self.assertEqual(saw_upload, [True])
+                self.assertEqual(outcome, "failed")
+                self.assertEqual(codecurl.status, StatusCodec.ERROR)
+                self.assertEqual(codecurl.progress, 99.99)
+                self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
+                self.assertFalse(staging.exists())
+                self.assertTrue((self.storage.downloads_dir / f"{codecurl.id}.{extension}").is_file())
+                events = [json.loads(message.record["message"]) for message in messages]
+                self.assertEqual([event["event"] for event in events], [
+                    "download_pipeline_started", "video_download_failed",
+                ])
+                self.assertEqual(events[-1]["codecurl_id"], str(codecurl.id))
+                self.assertEqual(events[-1]["request_id"], "request-45")
+                self.assertEqual(set(events[-1]), {
+                    "event", "codecurl_id", "error", "error_type", "request_id",
+                })
 
     def test_post_process_failure_removes_staging_but_not_other_files(self):
         codecurl = CodecUrls.objects.create(
