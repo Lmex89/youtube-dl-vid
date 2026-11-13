@@ -90,6 +90,26 @@ def _discard_final(destination, job: JobContext) -> None:
         }))
 
 
+def _reconcile(job: JobContext, exc: SuccessCommitUncertain) -> CodecUrls | None:
+    """Return the confirmed request, or log and return None when still unknown."""
+    # shortcut: unconfirmed commits stay pending (list_stale_jobs) and keep the file
+    # for manual reconciliation; add a recovery job if they show up in practice.
+    unconfirmed = json.dumps({
+        "event": "download_success_unconfirmed",
+        "codecurl_id": job.codecurl_id,
+        "error_type": exc.cause.__class__.__name__,
+        "request_id": job.request_id,
+    })
+    try:
+        codecurl = reconcile_success(job.codecurl_id)
+    except Exception:
+        logger.exception(unconfirmed)  # keeps the reconciliation error's traceback
+        return None
+    if codecurl is None:
+        logger.error(unconfirmed)
+    return codecurl
+
+
 def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) -> JobOutcome:
     """Run one download synchronously and return succeeded, failed or discarded."""
     job = JobContext(str(codecurl_id), request_id)
@@ -114,22 +134,10 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
         try:
             codecurl = record_success(job.codecurl_id, profile, destination, title)
         except SuccessCommitUncertain as exc:
-            try:
-                codecurl = reconcile_success(job.codecurl_id)
-            except Exception:
-                codecurl = None
-            if codecurl is None:
-                # shortcut: unconfirmed commits need manual reconciliation; add recovery if needed.
-                logger.error(json.dumps({
-                    "event": "download_success_unconfirmed",
-                    "codecurl_id": job.codecurl_id,
-                    "error_type": exc.cause.__class__.__name__,
-                    "request_id": job.request_id,
-                }))
-                _log_failure(job, exc.cause)
-                return JobOutcome.FAILED
-            if not is_successful(codecurl):
-                _discard_final(destination, job)
+            codecurl = _reconcile(job, exc)
+            if codecurl is None or not is_successful(codecurl):
+                if codecurl is not None:  # failure confirmed: the file has no record
+                    _discard_final(destination, job)
                 _log_failure(job, exc.cause)
                 return JobOutcome.FAILED
         except Exception:
