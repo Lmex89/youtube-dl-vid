@@ -1,6 +1,7 @@
 import json
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +11,7 @@ from loguru import logger
 from videos.job_run import run_job
 from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
 from videos.profiles import get_profile
+from videos.running_jobs import register, unregister
 from videos.storage import DownloadRetention, DownloadStorage
 from videos.test_utils import FakeCommandRunner
 
@@ -31,6 +33,35 @@ class JobSupersessionTests(TestCase):
 
     def paths(self, request):
         return self.storage.job_paths(str(request.id), get_profile(request.output_profile))
+
+    def test_running_job_is_protected_until_unregistered(self):
+        older = CodecUrls.objects.create(url="https://example.com/same")
+        self.assertEqual(self.run_request(older), "succeeded")
+        old = self.paths(older)
+        upload = VideosUploaded.objects.get(codecurl=older)
+        job_id = str(older.id)
+        register(job_id, threading.current_thread())
+        self.addCleanup(unregister, job_id)
+
+        newer = CodecUrls.objects.create(url=older.url)
+        self.assertEqual(self.run_request(newer), "succeeded")
+
+        older.refresh_from_db()
+        self.assertEqual(older.status, StatusCodec.SUCCESS)
+        self.assertTrue(VideosUploaded.objects.filter(pk=upload.pk).exists())
+        self.assertEqual(old.final.read_bytes(), b"fake")
+        self.assertTrue(old.log.is_file())
+
+        unregister(job_id)
+        newest = CodecUrls.objects.create(url=older.url)
+        self.assertEqual(self.run_request(newest), "succeeded")
+
+        self.assertFalse(CodecUrls.objects.filter(pk=older.pk).exists())
+        self.assertFalse(VideosUploaded.objects.filter(pk=upload.pk).exists())
+        self.assertFalse(old.final.exists())
+        self.assertFalse(old.log.exists())
+        self.assertTrue(VideosUploaded.objects.filter(codecurl=newest).exists())
+        self.assertTrue(self.paths(newest).final.is_file())
 
     def test_success_replaces_earlier_success_and_owned_artifacts(self):
         url = "https://example.com/watch?v=" + "x" * 200
