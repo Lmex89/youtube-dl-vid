@@ -1,7 +1,9 @@
 import json
 import tempfile
 import threading
+import time
 from pathlib import Path
+from unittest import skipUnless
 from unittest.mock import patch
 
 from django.db import OperationalError, connection, connections, transaction
@@ -328,6 +330,98 @@ class JobCommitSafetyTests(TransactionTestCase):
         self.assertEqual(codecurl.status, StatusCodec.SUCCESS)
         self.assertTrue(VideosUploaded.objects.filter(codecurl=codecurl, file_path=str(final)).exists())
         self.assertTrue(final.is_file())
+
+    @skipUnless(connection.vendor == "postgresql", "requires PostgreSQL row locks")
+    def test_reconciliation_times_out_without_overwriting_in_flight_success(self):
+        codecurl = CodecUrls.objects.create(url="https://example.com/video")
+        final = self.storage.downloads_dir / f"{codecurl.id}.mp4"
+        locked, release = threading.Event(), threading.Event()
+        errors = []
+
+        def finish_success():
+            try:
+                with transaction.atomic():
+                    request = CodecUrls.objects.select_for_update().get(pk=codecurl.pk)
+                    request.status = StatusCodec.SUCCESS
+                    request.progress = 100.0
+                    request.save(update_fields=["status", "progress", "updated_at"])
+                    VideosUploaded.objects.create(codecurl=request, file_path=str(final), title="Video")
+                    locked.set()
+                    if not release.wait(8):
+                        raise TimeoutError("success transaction was not released")
+            except Exception as exc:
+                errors.append(exc)
+                locked.set()
+            finally:
+                connections.close_all()
+
+        holder = threading.Thread(target=finish_success)
+        commit, rollback = connection.commit, connection.rollback
+        calls = []
+
+        def fail_first_commit():
+            calls.append(True)
+            if len(calls) == 1:
+                raise OperationalError("commit acknowledgement lost")
+            return commit()
+
+        def rollback_then_hold_row():
+            rollback()
+            if holder.ident is None:
+                holder.start()
+                if not locked.wait(5) or errors:
+                    raise RuntimeError("success transaction did not acquire row lock")
+
+        messages = []
+        sink = logger.add(
+            messages.append, level="ERROR",
+            filter=lambda record: record["name"] == "videos.job_run",
+        )
+        self.addCleanup(logger.remove, sink)
+        with connection.cursor() as cursor:
+            cursor.execute("SHOW lock_timeout")
+            original_timeout = cursor.fetchone()[0]
+        try:
+            with patch.object(connection, "commit", side_effect=fail_first_commit):
+                with patch.object(connection, "rollback", side_effect=rollback_then_hold_row):
+                    with self.assertLogs("videos", level="ERROR") as logs:
+                        started = time.monotonic()
+                        outcome = self.run_job(codecurl)
+                        elapsed = time.monotonic() - started
+            locked_on_return = holder.is_alive()
+            file_on_return = final.is_file()
+        finally:
+            release.set()
+            if holder.ident is not None:
+                holder.join(10)
+
+        self.assertFalse(holder.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(locked_on_return)
+        self.assertLess(elapsed, 5)
+        self.assertEqual(outcome, "failed")
+        self.assertTrue(file_on_return)
+        codecurl.refresh_from_db()
+        self.assertEqual(codecurl.status, StatusCodec.SUCCESS)
+        self.assertEqual(codecurl.progress, 100.0)
+        self.assertTrue(VideosUploaded.objects.filter(codecurl=codecurl, file_path=str(final)).exists())
+        self.assertTrue(final.is_file())
+        self.assertEqual([json.loads(r.getMessage()) for r in logs.records], [{
+            "event": "download_success_unconfirmed",
+            "codecurl_id": str(codecurl.id),
+            "error_type": "OperationalError",
+            "request_id": "request-safety",
+        }])
+        self.assertEqual([json.loads(m.record["message"]) for m in messages], [{
+            "event": "video_download_failed",
+            "codecurl_id": str(codecurl.id),
+            "error": "commit acknowledgement lost",
+            "error_type": "OperationalError",
+            "request_id": "request-safety",
+        }])
+        with connection.cursor() as cursor:
+            cursor.execute("SHOW lock_timeout")
+            self.assertEqual(cursor.fetchone()[0], original_timeout)
 
     def test_outer_failure_does_not_overwrite_existing_success(self):
         codecurl = CodecUrls.objects.create(url="https://example.com/video")

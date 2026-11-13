@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 
 from videos.models import CodecUrls, StatusCodec, VideosUploaded
@@ -84,7 +84,9 @@ def record_success(codecurl_id: str, profile, destination: Path, title: str) -> 
 def reconcile_success(codecurl_id: str, destination: Path):
     """Return the confirmed successful or failed request, or None if unknown."""
     with transaction.atomic():
-        # Wait for the success transaction's row lock before deciding it rolled back.
+        # Allow normal commits to finish without waiting indefinitely for a broken session.
+        with connection.cursor() as cursor:
+            cursor.execute("SET LOCAL lock_timeout = '2s'")
         codecurl = CodecUrls.objects.select_for_update().filter(pk=codecurl_id).first()
         if codecurl is None:
             return None
