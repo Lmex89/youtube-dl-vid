@@ -81,11 +81,21 @@ def record_success(codecurl_id: str, profile, destination: Path, title: str) -> 
         raise
 
 
-def confirmed_success(codecurl_id: str, destination: Path):
-    upload = VideosUploaded.objects.select_related("codecurl").filter(
-        codecurl_id=codecurl_id, codecurl__status=_SUCCESS, file_path=str(destination)
-    ).first()
-    return upload.codecurl if upload else None
+def reconcile_success(codecurl_id: str, destination: Path):
+    """Return the confirmed successful or failed request, or None if unknown."""
+    with transaction.atomic():
+        # Wait for the success transaction's row lock before deciding it rolled back.
+        codecurl = CodecUrls.objects.select_for_update().filter(pk=codecurl_id).first()
+        if codecurl is None:
+            return None
+        uploads = VideosUploaded.objects.filter(codecurl_id=codecurl_id)
+        if is_successful(codecurl):
+            return codecurl if uploads.filter(file_path=str(destination)).exists() else None
+        if codecurl.status != StatusCodec.PENDING or uploads.exists():
+            return None
+        codecurl.status = StatusCodec.ERROR
+        codecurl.save(update_fields=["status", "updated_at"])
+        return codecurl
 
 
 def mark_failed(codecurl_id: str) -> None:

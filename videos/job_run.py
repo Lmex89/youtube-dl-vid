@@ -6,8 +6,8 @@ from django.conf import settings
 from loguru import logger
 
 from videos.lifecycle import (
-    ProgressReporter, SuccessCommitUncertain, confirmed_success, mark_failed,
-    record_success,
+    ProgressReporter, SuccessCommitUncertain, is_successful, mark_failed,
+    reconcile_success, record_success,
 )
 from videos.models import CodecUrls
 from videos.process import parse_yt_dlp_progress
@@ -73,6 +73,18 @@ def _log_failure(codecurl_id: str, request_id: str, exc: Exception) -> None:
     }))
 
 
+def _discard_final(destination, codecurl_id: str, request_id: str) -> None:
+    try:
+        destination.unlink(missing_ok=True)
+    except Exception as cleanup_error:
+        cleanup_logger.error(json.dumps({
+            "event": "download_final_cleanup_failed",
+            "codecurl_id": codecurl_id,
+            "error_type": cleanup_error.__class__.__name__,
+            "request_id": request_id,
+        }))
+
+
 def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) -> JobOutcome:
     """Run one download synchronously and return succeeded, failed or discarded."""
     try:
@@ -97,7 +109,7 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
             codecurl = record_success(codecurl_id, profile, destination, title)
         except SuccessCommitUncertain as exc:
             try:
-                codecurl = confirmed_success(codecurl_id, destination)
+                codecurl = reconcile_success(codecurl_id, destination)
             except Exception:
                 codecurl = None
             if codecurl is None:
@@ -110,16 +122,12 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
                 }))
                 _log_failure(codecurl_id, request_id, exc.__cause__)
                 return JobOutcome.FAILED
+            if not is_successful(codecurl):
+                _discard_final(destination, codecurl_id, request_id)
+                _log_failure(codecurl_id, request_id, exc.__cause__)
+                return JobOutcome.FAILED
         except Exception:
-            try:
-                destination.unlink(missing_ok=True)
-            except Exception as cleanup_error:
-                cleanup_logger.error(json.dumps({
-                    "event": "download_final_cleanup_failed",
-                    "codecurl_id": codecurl_id,
-                    "error_type": cleanup_error.__class__.__name__,
-                    "request_id": request_id,
-                }))
+            _discard_final(destination, codecurl_id, request_id)
             raise
 
         discarded = False

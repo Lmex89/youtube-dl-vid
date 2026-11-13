@@ -1,9 +1,10 @@
 import json
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
-from django.db import OperationalError, connection
+from django.db import OperationalError, connection, connections, transaction
 from django.test import TransactionTestCase
 from loguru import logger
 
@@ -147,6 +148,185 @@ class JobCommitSafetyTests(TransactionTestCase):
         self.assertEqual(outcome, "failed")
         self.assertEqual(codecurl.status, StatusCodec.PENDING)
         self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
+        self.assertTrue(final.is_file())
+
+    def test_rolled_back_commit_is_verified_and_cleans_only_its_file(self):
+        previous = CodecUrls.objects.create(url="https://example.com/video")
+        self.assertEqual(self.run_job(previous), "succeeded")
+        previous_file = Path(VideosUploaded.objects.get(codecurl=previous).file_path)
+        codecurl = CodecUrls.objects.create(url=previous.url)
+        final = self.storage.downloads_dir / f"{codecurl.id}.mp4"
+        commit = connection.commit
+        calls = []
+
+        def fail_first_commit():
+            calls.append(True)
+            if len(calls) == 1:
+                raise OperationalError("commit not applied")
+            return commit()
+
+        messages = []
+        sink = logger.add(
+            messages.append, level="ERROR",
+            filter=lambda record: record["name"] == "videos.job_run",
+        )
+        self.addCleanup(logger.remove, sink)
+        with patch.object(connection, "commit", side_effect=fail_first_commit):
+            outcome = self.run_job(codecurl)
+
+        codecurl.refresh_from_db()
+        self.assertEqual(outcome, "failed")
+        self.assertEqual(codecurl.status, StatusCodec.ERROR)
+        self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
+        self.assertFalse(final.exists())
+        self.assertTrue(previous_file.is_file())
+        self.assertTrue(VideosUploaded.objects.filter(codecurl=previous).exists())
+        self.assertEqual([json.loads(m.record["message"]) for m in messages], [{
+            "event": "video_download_failed",
+            "codecurl_id": str(codecurl.id),
+            "error": "commit not applied",
+            "error_type": "OperationalError",
+            "request_id": "request-safety",
+        }])
+
+    def test_lost_reconciliation_commit_acknowledgement_keeps_file(self):
+        codecurl = CodecUrls.objects.create(url="https://example.com/video")
+        final = self.storage.downloads_dir / f"{codecurl.id}.mp4"
+        commit = connection.commit
+        calls = []
+
+        def lose_acknowledgements():
+            calls.append(True)
+            if len(calls) == 1:
+                raise OperationalError("original commit not applied")
+            commit()
+            raise OperationalError("reconciliation acknowledgement lost")
+
+        messages = []
+        sink = logger.add(
+            messages.append, level="ERROR",
+            filter=lambda record: record["name"] == "videos.job_run",
+        )
+        self.addCleanup(logger.remove, sink)
+        with patch.object(connection, "commit", side_effect=lose_acknowledgements):
+            with self.assertLogs("videos", level="ERROR") as logs:
+                outcome = self.run_job(codecurl)
+
+        codecurl.refresh_from_db()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(outcome, "failed")
+        self.assertEqual(codecurl.status, StatusCodec.ERROR)
+        self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
+        self.assertTrue(final.is_file())
+        self.assertEqual(json.loads(logs.records[0].getMessage())["event"],
+                         "download_success_unconfirmed")
+        self.assertEqual([json.loads(m.record["message"]) for m in messages], [{
+            "event": "video_download_failed",
+            "codecurl_id": str(codecurl.id),
+            "error": "original commit not applied",
+            "error_type": "OperationalError",
+            "request_id": "request-safety",
+        }])
+
+    def test_pending_request_with_upload_remains_unconfirmed(self):
+        codecurl = CodecUrls.objects.create(url="https://example.com/video")
+        upload = VideosUploaded.objects.create(codecurl=codecurl, title="Existing")
+        final = self.storage.downloads_dir / f"{codecurl.id}.mp4"
+        commit = connection.commit
+        calls = []
+
+        def fail_first_commit():
+            calls.append(True)
+            if len(calls) == 1:
+                raise OperationalError("commit not applied")
+            return commit()
+
+        with patch.object(connection, "commit", side_effect=fail_first_commit):
+            with self.assertLogs("videos", level="ERROR"):
+                outcome = self.run_job(codecurl)
+
+        codecurl.refresh_from_db()
+        self.assertEqual(outcome, "failed")
+        self.assertEqual(codecurl.status, StatusCodec.PENDING)
+        self.assertTrue(VideosUploaded.objects.filter(pk=upload.pk).exists())
+        self.assertTrue(final.is_file())
+
+    def test_reconciliation_waits_for_in_flight_success(self):
+        codecurl = CodecUrls.objects.create(url="https://example.com/video")
+        final = self.storage.downloads_dir / f"{codecurl.id}.mp4"
+        locked, release, checking, finished = (threading.Event() for _ in range(4))
+        errors, outcomes = [], []
+
+        def finish_success():
+            try:
+                with transaction.atomic():
+                    request = CodecUrls.objects.select_for_update().get(pk=codecurl.pk)
+                    request.status = StatusCodec.SUCCESS
+                    request.progress = 100.0
+                    request.save(update_fields=["status", "progress", "updated_at"])
+                    VideosUploaded.objects.create(codecurl=request, file_path=str(final), title="Video")
+                    locked.set()
+                    if not release.wait(5):
+                        raise TimeoutError("success transaction was not released")
+            except Exception as exc:
+                errors.append(exc)
+                locked.set()
+            finally:
+                connections.close_all()
+
+        holder = threading.Thread(target=finish_success)
+
+        def run_with_uncertain_commit():
+            commit, rollback = connection.commit, connection.rollback
+            calls = []
+
+            def fail_first_commit():
+                calls.append(True)
+                if len(calls) == 1:
+                    raise OperationalError("commit acknowledgement lost")
+                return commit()
+
+            def rollback_then_hold_row():
+                rollback()
+                holder.start()
+                if not locked.wait(5):
+                    raise TimeoutError("success transaction did not acquire row lock")
+
+            def observe_lock(execute, sql, params, many, context):
+                if "FOR UPDATE" in sql:
+                    checking.set()
+                return execute(sql, params, many, context)
+
+            try:
+                with connection.execute_wrapper(observe_lock):
+                    with patch.object(connection, "commit", side_effect=fail_first_commit):
+                        with patch.object(connection, "rollback", side_effect=rollback_then_hold_row):
+                            outcomes.append(self.run_job(codecurl))
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                connections.close_all()
+                finished.set()
+
+        job = threading.Thread(target=run_with_uncertain_commit)
+        job.start()
+        try:
+            self.assertTrue(locked.wait(5))
+            self.assertTrue(checking.wait(5))
+            self.assertFalse(finished.wait(0.2))
+        finally:
+            release.set()
+            job.join(10)
+            if holder.ident is not None:
+                holder.join(10)
+
+        self.assertFalse(job.is_alive())
+        self.assertFalse(holder.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(outcomes, ["succeeded"])
+        codecurl.refresh_from_db()
+        self.assertEqual(codecurl.status, StatusCodec.SUCCESS)
+        self.assertTrue(VideosUploaded.objects.filter(codecurl=codecurl, file_path=str(final)).exists())
         self.assertTrue(final.is_file())
 
     def test_outer_failure_does_not_overwrite_existing_success(self):
