@@ -58,7 +58,8 @@ A `VideosUploaded` record is created only after the download succeeds.
 - **`videos/process.py`** — single deep command-execution module: the `CommandRunner` ABC and its one production implementation `_RealCommandRunner` (real subprocess executor with streaming output, timeout enforcement, structured JSON logging), progress parsers (`parse_yt_dlp_progress`, `build_progress_parser` for ffmpeg `out_time_us`), type aliases (`ProgressCallback`, `ProgressParser`)
 - **`videos/runner.py`** — `get_command_runner()` factory + `set_test_runner()`, which swaps in a `FakeCommandRunner` for tests (re-exports `CommandRunner`). Callers use `runner.run(command, log_path, label, timeout, ...)` directly — no per-tool helper functions
 - **`videos/media.py`** — `probe_duration()` for ffprobe queries (has real logic: temp file, command assembly, duration parsing). No pass-through helpers; ffmpeg runs go through `runner.run()` directly from `profiles.py`
-- **`videos/job_run.py`** — `run_job` synchronously runs one download with injected runner, storage and retention; returns a `JobOutcome` (`succeeded`, `failed` or `discarded`). Owns phase progress mapping, artifact creation, supersession, lifecycle logging and staging cleanup (a refused cleanup is logged as `download_staging_cleanup_failed`, never raised). yt-dlp output is kept only in the per-download log, not replayed into application logs
+- **`videos/lifecycle.py`** — owns request status and progress transitions, phase progress mapping, and atomic creation of the uploaded record with successful completion
+- **`videos/job_run.py`** — `run_job` synchronously orchestrates one download with injected runner, storage and retention; returns a `JobOutcome` (`succeeded`, `failed` or `discarded`). Owns fetching, post-processing, supersession, lifecycle logging and cleanup (refused staging or final-file cleanup logs `download_staging_cleanup_failed` or `download_final_cleanup_failed` without changing the outcome). yt-dlp output is kept only in the per-download log, not replayed into application logs
 - **`videos/download.py`** — thin thread wrapper builds default collaborators and calls `run_job`, then cleans up the thread registry and database connections. Public interfaces: `start_download_async` and `is_download_running`
 - **`Youtube_dl_vid/`** — project settings, logging config, middleware, URL routing
 - **`docker-entrypoint.sh`** — runs `makemigrations` → `migrate` → `collectstatic` → `gunicorn`
@@ -78,6 +79,7 @@ A `VideosUploaded` record is created only after the download succeeds.
   - `app.log` (INFO+, 30-day retention)
   - `error.log` (ERROR+, 90-day retention)
   - `debug.log` (DEBUG+, 7-day retention)
+  - All sinks disable Loguru diagnosis: tracebacks and structured exception fields remain, but local values are omitted to avoid extra queryset queries on 404s and exposure of sensitive values
 - `psycopg[binary]~=3.3` (not `psycopg2`) — musllinux wheels on `python:3.14-alpine`
 - Non-root `appuser` created but runs as root for bind mount compatibility
 - `collectstatic` runs every container start (output to `staticfiles/`)
