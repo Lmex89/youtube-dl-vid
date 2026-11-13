@@ -58,7 +58,7 @@ def _async_download_worker(codecurl_id: str, request_id: str) -> None:
     try:
         close_old_connections()
         storage = DownloadStorage()
-        retention = DownloadRetention(storage, is_running=is_download_running)
+        retention = DownloadRetention(storage)
         runner = get_command_runner()
         run_job(
             codecurl_id, request_id, runner=runner, storage=storage,

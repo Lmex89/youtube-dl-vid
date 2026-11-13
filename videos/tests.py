@@ -1329,6 +1329,49 @@ class LifecycleLoggingTests(DirectDownloadJobTestCase):
         self.assertEqual(runner.calls[0]["timeout"], 42)
 
 
+class RetentionUsesRegistryDirectlyTests(TestCase):
+    """DownloadRetention consults the running-job registry without injection."""
+
+    def setUp(self):
+        from videos.running_jobs import register, unregister
+
+        self._register = register
+        self._unregister = unregister
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._downloads = Path(self._tmp.name) / "downloads"
+        self._logs = Path(self._tmp.name) / "logs"
+        self.storage = DownloadStorage(self._downloads, self._logs)
+
+    def test_retention_constructed_without_is_running_protects_registered_jobs(self):
+        old_codecurl = CodecUrls.objects.create(
+            url="https://example.com/v", status=StatusCodec.SUCCESS
+        )
+        new_codecurl = CodecUrls.objects.create(
+            url="https://example.com/v", status=StatusCodec.PENDING
+        )
+        self._register(str(old_codecurl.id), threading.current_thread())
+        try:
+            retention = DownloadRetention(self.storage)
+            superseded = retention._superseded_ids(new_codecurl)
+        finally:
+            self._unregister(str(old_codecurl.id))
+
+        self.assertNotIn(str(old_codecurl.id), [str(s) for s in superseded])
+
+    def test_retention_supersedes_unregistered_old_jobs(self):
+        old_codecurl = CodecUrls.objects.create(
+            url="https://example.com/v", status=StatusCodec.SUCCESS
+        )
+        new_codecurl = CodecUrls.objects.create(
+            url="https://example.com/v", status=StatusCodec.PENDING
+        )
+        retention = DownloadRetention(self.storage)
+        superseded = retention._superseded_ids(new_codecurl)
+
+        self.assertIn(old_codecurl.id, list(superseded))
+
+
 class RunningJobsModuleTests(TestCase):
     """The running_jobs module exposes a process-local thread registry."""
 

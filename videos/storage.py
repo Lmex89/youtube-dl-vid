@@ -6,13 +6,14 @@ import mimetypes
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from django.conf import settings
 
 from videos.lifecycle import is_successful, successful_requests
 from videos.models import CodecUrls, VideosUploaded
 from videos.profiles import BaseDownloadProfile, get_profile
+from videos.running_jobs import is_running
 
 STAGING_DIR_NAME = ".tmp"
 URL_PREVIEW_LEN = 50
@@ -172,22 +173,11 @@ class DownloadStorage:
 class DownloadRetention:
     """Retention policy: supersede earlier jobs and clean up orphans."""
 
-    def __init__(
-        self,
-        storage: DownloadStorage,
-        # Injected to avoid importing videos.download (circular dependency).
-        is_running: Callable[[str], bool] = lambda codecurl_id: False,
-    ):
+    def __init__(self, storage: DownloadStorage):
         self.storage = storage
-        self._is_running = is_running
 
     def _superseded_ids(self, codecurl) -> list:
-        """Earlier jobs for the same URL and profile that are not running.
-
-        shortcut: running state is per-process (thread registry), so a job
-        running in another gunicorn worker is not protected; upgrade by
-        persisting a heartbeat if multi-worker races show up.
-        """
+        """Earlier jobs for the same URL and profile that are not running."""
         earlier = (
             CodecUrls.objects.filter(
                 url=codecurl.url,
@@ -198,7 +188,7 @@ class DownloadRetention:
             .values_list("id", flat=True)
         )
         return [
-            old_id for old_id in earlier if not self._is_running(str(old_id))
+            old_id for old_id in earlier if not is_running(str(old_id))
         ]
 
     @staticmethod
