@@ -96,7 +96,9 @@ A `VideosUploaded` record is created only after the download succeeds.
 - Truncate long values (URLs, payloads) to 50-100 chars
 - Downloads >500ms: WARNING; requests >2s: WARNING (auto-logged by middleware)
 - Exception handling uses `custom_exception_handler` (in `REST_FRAMEWORK` settings)
-- Loguru available for non-Django code with `serialize=True`
+- Loguru available for non-Django code with `serialize=True`; modules that
+  already log through Loguru (e.g. `videos/job_run.py`) keep all their events
+  on it so one sink captures them
 
 ## Commit practices (mandatory)
 
