@@ -43,7 +43,7 @@ Secuencia de resoluciones descendentes (720p, 480p, 360p) que se prueban en orde
 _Avoid_: Lista de calidades, pasos de compresión
 
 **Progreso**:
-Porcentaje de avance de una solicitud de descarga, de 0 a 100. Se actualiza en tiempo real durante la descarga y el post-procesamiento. Se lee con `get_job_state` (`videos/download.py`), junto con el Estado; el job se inicia con `start_download_async`.
+Porcentaje de avance de una solicitud de descarga, de 0 a 100. Se actualiza en tiempo real durante la descarga y el post-procesamiento.
 _Avoid_: Avance, porcentaje
 
 **Estado**:
