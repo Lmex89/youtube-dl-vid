@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 import uuid
+from contextlib import redirect_stdout
 from datetime import timedelta
 from io import StringIO
 from pathlib import Path
@@ -20,6 +21,7 @@ from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from Youtube_dl_vid.logging_config import setup_logging
 from videos.download import (
     is_download_running,
     stale_pending_jobs,
@@ -952,8 +954,51 @@ class CodecUrlsDetailTests(TestCase):
                 )
 
     def test_unknown_detail_returns_404(self):
-        response = self.client.get(f"/api/v1/yt/videos/{uuid.uuid4()}")
-        self.assertEqual(response.status_code, 404)
+        path = f"/api/v1/yt/videos/{uuid.uuid4()}"
+        stdout = StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                with redirect_stdout(stdout):
+                    setup_logging(tmp)
+                with self.assertNumQueries(1):
+                    response = self.client.get(path)
+                loguru_logger.complete()
+
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.data, {
+                    "detail": "No CodecUrls matches the given query.",
+                    "status_code": 404, "path": path,
+                    "request_id": response.data["request_id"],
+                })
+                self.assertTrue(response.data["request_id"])
+                self.assertIn("Traceback (most recent call last)", stdout.getvalue())
+                for filename in ("app.log", "error.log", "debug.log"):
+                    with self.subTest(sink=filename):
+                        records = [json.loads(line) for line in Path(tmp, filename).read_text().splitlines()]
+                        exceptions = [record for record in records
+                                      if '"event": "exception"' in record["record"]["message"]]
+                        self.assertEqual(len(exceptions), 1)
+                        record = exceptions[0]
+                        event = json.loads(record["record"]["message"])
+                        self.assertEqual(set(event), {
+                            "event", "timestamp", "level", "logger", "request_id", "context",
+                        })
+                        self.assertTrue(event["timestamp"])
+                        self.assertEqual(event["level"], "ERROR")
+                        self.assertEqual(event["logger"], "videos")
+                        self.assertEqual(event["request_id"], response.data["request_id"])
+                        self.assertEqual(event["context"], {
+                            "exception_type": "Http404",
+                            "exception_message": "No CodecUrls matches the given query.",
+                            "view": "CodecUrlsDetailAPIView", "path": path,
+                            "method": "GET", "user": "anonymous", "ip": "127.0.0.1",
+                        })
+                        self.assertIn(json.dumps(event), stdout.getvalue())
+                        self.assertEqual(record["record"]["exception"]["type"], "Http404")
+                        self.assertTrue(record["record"]["exception"]["traceback"])
+                        self.assertIn("Traceback (most recent call last)", record["text"])
+            finally:
+                setup_logging()
 
 
 class SupersedeOnSuccessTests(DownloadJobTestCase):
