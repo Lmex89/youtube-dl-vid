@@ -1329,6 +1329,44 @@ class LifecycleLoggingTests(DirectDownloadJobTestCase):
         self.assertEqual(runner.calls[0]["timeout"], 42)
 
 
+class RunningJobsModuleTests(TestCase):
+    """The running_jobs module exposes a process-local thread registry."""
+
+    def test_register_and_unregister_round_trip(self):
+        from videos.running_jobs import register, unregister, is_running, running_ids
+
+        register("aaa", threading.current_thread())
+        try:
+            self.assertTrue(is_running("aaa"))
+            self.assertIn("aaa", running_ids())
+        finally:
+            unregister("aaa")
+        self.assertFalse(is_running("aaa"))
+        self.assertNotIn("aaa", running_ids())
+
+    def test_register_if_absent_returns_false_when_already_registered(self):
+        from videos.running_jobs import register, unregister, register_if_absent
+
+        register("bbb", threading.current_thread())
+        try:
+            other = threading.Thread(target=lambda: None)
+            self.assertFalse(register_if_absent("bbb", other))
+        finally:
+            unregister("bbb")
+
+    def test_register_if_absent_calls_while_locked_and_registers(self):
+        from videos.running_jobs import register_if_absent, unregister, is_running
+
+        called = []
+        thread = threading.Thread(target=lambda: None)
+        self.assertTrue(register_if_absent("ccc", thread, while_locked=lambda: called.append(1)))
+        try:
+            self.assertEqual(called, [1])
+            self.assertTrue(is_running("ccc"))
+        finally:
+            unregister("ccc")
+
+
 class StaleJobTests(TestCase):
     def test_lists_pending_jobs_without_a_running_thread(self):
         stale = CodecUrls.objects.create(url="https://example.com/a")
