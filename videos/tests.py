@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from datetime import timedelta
 from io import StringIO
 from pathlib import Path
@@ -20,8 +21,6 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from videos.download import (
-    JobState,
-    get_job_state,
     is_download_running,
     stale_pending_jobs,
     start_download_async,
@@ -922,24 +921,39 @@ class ReencodeProfileJobTests(DirectDownloadJobTestCase):
         self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
 
 
-class GetJobStateTests(TestCase):
-    def test_returns_state_for_each_status(self):
-        for status, progress in [(2, 42.5), (1, 100.0), (3, 7.0)]:
-            c = CodecUrls.objects.create(
-                url="https://example.com", status=status, progress=progress
-            )
-            self.assertEqual(get_job_state(str(c.id)), JobState(status, progress))
+class CodecUrlsDetailTests(TestCase):
+    def setUp(self):
+        caches["ratelimit"].clear()
+        self.client = APIClient()
 
-    def test_unknown_id_returns_none(self):
-        import uuid
+    def test_pending_detail_reads_status_and_progress_in_one_query(self):
+        codecurl = CodecUrls.objects.create(
+            url="https://example.com", status=StatusCodec.PENDING, progress=42.5
+        )
 
-        self.assertIsNone(get_job_state(str(uuid.uuid4())))
+        with self.assertNumQueries(1):
+            response = self.client.get(f"/api/v1/yt/videos/{codecurl.id}")
 
-    def test_detail_view_reads_through_get_job_state(self):
-        c = CodecUrls.objects.create(url="https://example.com", status=2, progress=10.0)
-        with patch("videos.views.get_job_state", return_value=JobState(1, 99.0)):
-            data = APIClient().get(f"/api/v1/yt/videos/{c.id}").json()
-        self.assertEqual((data["status"], data["progress"]), (1, 99.0))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual((response.data["status"], response.data["progress"]), (2, 42.5))
+
+    def test_success_and_error_detail_read_stored_status_and_progress(self):
+        for status, progress in [(StatusCodec.SUCCESS, 100.0), (StatusCodec.ERROR, 7.0)]:
+            with self.subTest(status=status):
+                codecurl = CodecUrls.objects.create(
+                    url="https://example.com", status=status, progress=progress
+                )
+                with self.assertNumQueries(1):
+                    response = self.client.get(f"/api/v1/yt/videos/{codecurl.id}")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    (response.data["status"], response.data["progress"]),
+                    (status, progress),
+                )
+
+    def test_unknown_detail_returns_404(self):
+        response = self.client.get(f"/api/v1/yt/videos/{uuid.uuid4()}")
+        self.assertEqual(response.status_code, 404)
 
 
 class SupersedeOnSuccessTests(DownloadJobTestCase):
