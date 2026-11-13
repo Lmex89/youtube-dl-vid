@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from django.db import OperationalError, connection
 from django.test import TransactionTestCase
+from loguru import logger
 
 from videos.job_run import run_job
 from videos.models import CodecUrls, StatusCodec, VideosUploaded
@@ -38,6 +39,12 @@ class JobCommitSafetyTests(TransactionTestCase):
             if len(calls) == 1:
                 raise OperationalError("commit acknowledgement lost")
 
+        messages = []
+        sink = logger.add(
+            messages.append, level="ERROR",
+            filter=lambda record: record["name"] == "videos.job_run",
+        )
+        self.addCleanup(logger.remove, sink)
         with patch.object(connection, "commit", side_effect=commit_then_fail):
             outcome = self.run_job(codecurl)
 
@@ -49,6 +56,7 @@ class JobCommitSafetyTests(TransactionTestCase):
         self.assertTrue(Path(upload.file_path).is_file())
         self.assertFalse(CodecUrls.objects.filter(pk=previous.pk).exists())
         self.assertFalse(previous_file.exists())
+        self.assertEqual(messages, [])
 
     def test_failed_write_rolls_back_and_removes_only_its_file(self):
         previous = CodecUrls.objects.create(url="https://example.com/video")
@@ -93,6 +101,12 @@ class JobCommitSafetyTests(TransactionTestCase):
                 raise OperationalError("database unavailable")
             return execute(sql, params, many, context)
 
+        messages = []
+        sink = logger.add(
+            messages.append, level="ERROR",
+            filter=lambda record: record["name"] == "videos.job_run",
+        )
+        self.addCleanup(logger.remove, sink)
         with connection.execute_wrapper(reject_queries):
             with patch.object(connection, "commit", side_effect=commit_then_lose_connection):
                 with self.assertLogs("videos", level="ERROR") as logs:
@@ -110,6 +124,13 @@ class JobCommitSafetyTests(TransactionTestCase):
         self.assertEqual([json.loads(r.getMessage()) for r in logs.records], [{
             "event": "download_success_unconfirmed",
             "codecurl_id": str(codecurl.id),
+            "error_type": "OperationalError",
+            "request_id": "request-safety",
+        }])
+        self.assertEqual([json.loads(message.record["message"]) for message in messages], [{
+            "event": "video_download_failed",
+            "codecurl_id": str(codecurl.id),
+            "error": "commit acknowledgement lost",
             "error_type": "OperationalError",
             "request_id": "request-safety",
         }])

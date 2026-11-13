@@ -63,6 +63,16 @@ def _fetch_and_process(codecurl, profile, paths, progress, runner) -> str:
     return title
 
 
+def _log_failure(codecurl_id: str, request_id: str, exc: Exception) -> None:
+    logger.error(json.dumps({
+        "event": "video_download_failed",
+        "codecurl_id": codecurl_id,
+        "error": str(exc)[:100],
+        "error_type": exc.__class__.__name__,
+        "request_id": request_id,
+    }))
+
+
 def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) -> JobOutcome:
     """Run one download synchronously and return succeeded, failed or discarded."""
     try:
@@ -98,6 +108,7 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
                     "error_type": exc.__cause__.__class__.__name__,
                     "request_id": request_id,
                 }))
+                _log_failure(codecurl_id, request_id, exc.__cause__)
                 return JobOutcome.FAILED
         except Exception:
             try:
@@ -141,15 +152,7 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
             )
         return JobOutcome.DISCARDED if discarded else JobOutcome.SUCCEEDED
     except Exception as exc:
-        logger.error(
-            json.dumps({
-                "event": "video_download_failed",
-                "codecurl_id": codecurl_id,
-                "error": str(exc)[:100],
-                "error_type": exc.__class__.__name__,
-                "request_id": request_id,
-            })
-        )
+        _log_failure(codecurl_id, request_id, exc)
         mark_failed(codecurl_id)
         return JobOutcome.FAILED
     finally:
