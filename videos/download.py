@@ -5,7 +5,7 @@ from django.db import close_old_connections
 from loguru import logger
 
 from videos.job_run import run_job
-from videos.lifecycle import pending_requests, start
+from videos.lifecycle import mark_started, pending_requests
 from videos.models import CodecUrls
 from videos.runner import get_command_runner
 from videos.storage import DownloadRetention, DownloadStorage
@@ -51,7 +51,7 @@ def start_download_async(codecurl: CodecUrls, request_id: str = "unknown") -> Co
             return codecurl
         # Register last so a failed save/start never leaves a stale entry;
         # the worker's cleanup waits on this lock, so it can't pop early.
-        start(codecurl)
+        mark_started(codecurl)
         thread.start()
         _download_threads[codecurl_id] = thread
     return codecurl

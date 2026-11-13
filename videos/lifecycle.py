@@ -5,10 +5,7 @@ from django.utils import timezone
 
 from videos.models import CodecUrls, StatusCodec, VideosUploaded
 
-_SUCCESS = StatusCodec.SUCCESS
-
-
-def start(codecurl: CodecUrls) -> None:
+def mark_started(codecurl: CodecUrls) -> None:
     codecurl.status = StatusCodec.PENDING
     codecurl.progress = 0.0
     codecurl.save(update_fields=["status", "progress", "updated_at"])
@@ -19,11 +16,11 @@ def pending_requests():
 
 
 def is_successful(codecurl: CodecUrls) -> bool:
-    return codecurl.status == _SUCCESS
+    return codecurl.status == StatusCodec.SUCCESS
 
 
 def successful_requests(queryset):
-    return queryset.filter(status=_SUCCESS)
+    return queryset.filter(status=StatusCodec.SUCCESS)
 
 
 class ProgressReporter:
@@ -78,7 +75,7 @@ def record_success(codecurl_id: str, profile, destination: Path, title: str) -> 
                 title=title[:250],
                 codecurl=codecurl,
             )
-            codecurl.status = _SUCCESS
+            codecurl.status = StatusCodec.SUCCESS
             codecurl.progress = 100.0
             codecurl.save(update_fields=["status", "progress", "updated_at"])
             writes_done = True
@@ -113,6 +110,6 @@ def reconcile_success(codecurl_id: str):
 
 def mark_failed(codecurl_id: str) -> None:
     # Never downgrade a recorded success: ADR 0001 ties Estado exitoso to its artifact.
-    CodecUrls.objects.filter(pk=codecurl_id).exclude(status=_SUCCESS).update(
+    CodecUrls.objects.filter(pk=codecurl_id).exclude(status=StatusCodec.SUCCESS).update(
         status=StatusCodec.ERROR, updated_at=timezone.now()
     )
