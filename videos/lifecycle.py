@@ -56,11 +56,19 @@ class ProgressReporter:
 
 
 class SuccessCommitUncertain(Exception):
-    """The success transaction may have committed despite an exception."""
+    """The success transaction may have committed despite an exception.
+
+    `cause` is the original commit error; callers inspect it instead of
+    walking the exception chain.
+    """
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__("success commit outcome unknown")
+        self.cause = cause
 
 
 def record_success(codecurl_id: str, profile, destination: Path, title: str) -> CodecUrls:
-    written = False
+    writes_done = False
     try:
         with transaction.atomic():
             codecurl = CodecUrls.objects.get(pk=codecurl_id)
@@ -73,15 +81,16 @@ def record_success(codecurl_id: str, profile, destination: Path, title: str) -> 
             codecurl.status = _SUCCESS
             codecurl.progress = 100.0
             codecurl.save(update_fields=["status", "progress", "updated_at"])
-            written = True
+            writes_done = True
         return codecurl
     except Exception as exc:
-        if written:
-            raise SuccessCommitUncertain from exc
+        # An exception after the writes can only be the commit; its outcome is unknown.
+        if writes_done:
+            raise SuccessCommitUncertain(exc) from exc
         raise
 
 
-def reconcile_success(codecurl_id: str, destination: Path):
+def reconcile_success(codecurl_id: str):
     """Return the confirmed successful or failed request, or None if unknown."""
     with transaction.atomic():
         # Allow normal commits to finish without waiting indefinitely for a broken session.
@@ -92,7 +101,9 @@ def reconcile_success(codecurl_id: str, destination: Path):
             return None
         uploads = VideosUploaded.objects.filter(codecurl_id=codecurl_id)
         if is_successful(codecurl):
-            return codecurl if uploads.filter(file_path=str(destination)).exists() else None
+            # The recorded upload row is authoritative; trust the database's
+            # success instead of contradicting it when paths differ.
+            return codecurl if uploads.exists() else None
         if codecurl.status != StatusCodec.PENDING or uploads.exists():
             return None
         codecurl.status = StatusCodec.ERROR
@@ -101,6 +112,7 @@ def reconcile_success(codecurl_id: str, destination: Path):
 
 
 def mark_failed(codecurl_id: str) -> None:
+    # Never downgrade a recorded success: ADR 0001 ties Estado exitoso to its artifact.
     CodecUrls.objects.filter(pk=codecurl_id).exclude(status=_SUCCESS).update(
         status=StatusCodec.ERROR, updated_at=timezone.now()
     )
