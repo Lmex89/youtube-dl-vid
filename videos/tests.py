@@ -1191,6 +1191,83 @@ class RunningJobProtectionTests(DownloadJobTestCase):
 
 
 class ConcurrentStartTests(DownloadJobTestCase):
+    def test_start_resets_request_and_duplicate_preserves_running_progress(self):
+        entered = threading.Event()
+        report = threading.Event()
+        reported = threading.Event()
+        release = threading.Event()
+
+        class BlockingRunner(FakeCommandRunner):
+            def run(self, *args, **kwargs):
+                entered.set()
+                report.wait(5)
+                kwargs["progress_callback"](42)
+                reported.set()
+                release.wait(5)
+                return super().run(*args, **kwargs)
+
+        runner = BlockingRunner()
+        set_test_runner(runner)
+        codecurl = CodecUrls.objects.create(
+            url="https://example.com/video", status=StatusCodec.ERROR, progress=73
+        )
+        original_updated_at = codecurl.updated_at
+        messages = []
+        sink = loguru_logger.add(messages.append, level="WARNING")
+        self.addCleanup(loguru_logger.remove, sink)
+        try:
+            self.assertIs(start_download_async(codecurl), codecurl)
+            self.assertTrue(entered.wait(5))
+            self.assertEqual((codecurl.status, codecurl.progress), (StatusCodec.PENDING, 0))
+            codecurl.refresh_from_db()
+            self.assertEqual((codecurl.status, codecurl.progress), (StatusCodec.PENDING, 0))
+            self.assertGreater(codecurl.updated_at, original_updated_at)
+
+            report.set()
+            self.assertTrue(reported.wait(5))
+            codecurl.refresh_from_db()
+            self.assertEqual(codecurl.progress, 42)
+            updated_at = codecurl.updated_at
+            self.assertIs(start_download_async(codecurl, request_id="duplicate"), codecurl)
+            self.assertEqual((codecurl.status, codecurl.progress), (StatusCodec.PENDING, 42))
+            self.assertEqual(codecurl.updated_at, updated_at)
+            codecurl.refresh_from_db()
+            self.assertEqual((codecurl.status, codecurl.progress), (StatusCodec.PENDING, 42))
+            self.assertEqual(codecurl.updated_at, updated_at)
+            event = next(json.loads(m.record["message"]) for m in messages
+                         if '"download_already_running"' in m.record["message"])
+            self.assertEqual(event["codecurl_id"], str(codecurl.id))
+            self.assertEqual(event["request_id"], "duplicate")
+        finally:
+            report.set()
+            release.set()
+            _wait_for_download(str(codecurl.id))
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_failed_save_does_not_register_a_worker(self):
+        codecurl = CodecUrls.objects.create(
+            url="https://example.com/video", status=StatusCodec.ERROR, progress=73
+        )
+        with patch.object(codecurl, "save", side_effect=RuntimeError("save failed")):
+            with self.assertRaisesRegex(RuntimeError, "save failed"):
+                start_download_async(codecurl)
+        self.assertFalse(is_download_running(str(codecurl.id)))
+        codecurl.refresh_from_db()
+        self.assertEqual((codecurl.status, codecurl.progress), (StatusCodec.ERROR, 73))
+
+    def test_failed_thread_start_keeps_reset_without_registering_worker(self):
+        codecurl = CodecUrls.objects.create(
+            url="https://example.com/video", status=StatusCodec.ERROR, progress=73
+        )
+        with patch(
+            "videos.download.threading.Thread.start", side_effect=RuntimeError("start failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "start failed"):
+                start_download_async(codecurl)
+        self.assertFalse(is_download_running(str(codecurl.id)))
+        codecurl.refresh_from_db()
+        self.assertEqual((codecurl.status, codecurl.progress), (StatusCodec.PENDING, 0))
+
     def test_concurrent_starts_run_exactly_one_job(self):
         release = threading.Event()
 
@@ -1259,6 +1336,53 @@ class StaleJobTests(TestCase):
             url="https://example.com/b", status=StatusCodec.SUCCESS
         )
         self.assertEqual(list(stale_pending_jobs()), [stale])
+
+
+class StaleJobCommandTests(DownloadJobTestCase):
+    def test_command_lists_only_pending_jobs_without_a_registered_worker(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingRunner(FakeCommandRunner):
+            def run(self, *args, **kwargs):
+                entered.set()
+                release.wait(5)
+                return super().run(*args, **kwargs)
+
+        set_test_runner(BlockingRunner())
+        stale = CodecUrls.objects.create(url="https://example.com/" + "x" * 100)
+        success = CodecUrls.objects.create(
+            url="https://example.com/success", status=StatusCodec.SUCCESS
+        )
+        failed = CodecUrls.objects.create(
+            url="https://example.com/error", status=StatusCodec.ERROR
+        )
+        running = CodecUrls.objects.create(url="https://example.com/running")
+        try:
+            start_download_async(running)
+            self.assertTrue(entered.wait(5))
+            with self.assertNumQueries(0):
+                pending = stale_pending_jobs()
+            later = CodecUrls.objects.create(url="https://example.com/later")
+            self.assertCountEqual([row.id for row in pending], [stale.id, later.id])
+
+            output = StringIO()
+            call_command("list_stale_jobs", stdout=output)
+            lines = output.getvalue().splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertIn(
+                f"{stale.id}\t{stale.updated_at:%Y-%m-%d %H:%M:%S}\t{stale.url[:80]}",
+                lines,
+            )
+            self.assertIn(
+                f"{later.id}\t{later.updated_at:%Y-%m-%d %H:%M:%S}\t{later.url}",
+                lines,
+            )
+            for job in (running, success, failed):
+                self.assertNotIn(str(job.id), output.getvalue())
+        finally:
+            release.set()
+            _wait_for_download(str(running.id))
 
 
 class CleanupDownloadsCommandTests(TestCase):

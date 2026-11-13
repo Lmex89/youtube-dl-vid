@@ -5,6 +5,26 @@ from django.utils import timezone
 
 from videos.models import CodecUrls, StatusCodec, VideosUploaded
 
+_SUCCESS = StatusCodec.SUCCESS
+
+
+def start(codecurl: CodecUrls) -> None:
+    codecurl.status = StatusCodec.PENDING
+    codecurl.progress = 0.0
+    codecurl.save(update_fields=["status", "progress", "updated_at"])
+
+
+def pending_requests():
+    return CodecUrls.objects.filter(status=StatusCodec.PENDING)
+
+
+def is_successful(codecurl: CodecUrls) -> bool:
+    return codecurl.status == _SUCCESS
+
+
+def successful_requests(queryset):
+    return queryset.filter(status=_SUCCESS)
+
 
 class ProgressReporter:
     """Clamp progress, never go backwards, and throttle small gains."""
@@ -44,7 +64,7 @@ def record_success(codecurl_id: str, profile, destination: Path, title: str) -> 
         title=title[:250],
         codecurl=codecurl,
     )
-    codecurl.status = StatusCodec.SUCCESS
+    codecurl.status = _SUCCESS
     codecurl.progress = 100.0
     codecurl.save(update_fields=["status", "progress", "updated_at"])
     return codecurl
