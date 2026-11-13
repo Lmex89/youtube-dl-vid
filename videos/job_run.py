@@ -3,9 +3,9 @@ from enum import StrEnum
 from pathlib import Path
 
 from django.conf import settings
-from django.utils import timezone
 from loguru import logger
 
+from videos.lifecycle import ProgressReporter
 from videos.models import CodecUrls, StatusCodec, VideosUploaded
 from videos.process import parse_yt_dlp_progress
 from videos.profiles import get_profile
@@ -16,34 +16,6 @@ class JobOutcome(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     DISCARDED = "discarded"
-
-
-class _ProgressSaver:
-    """Clamp to 0-100, never go backwards, and write only on >= min_step gains."""
-
-    def __init__(
-        self, codecurl_id: str, min_step: float = 1.0, download_weight: float = 1.0
-    ):
-        self.codecurl_id = codecurl_id
-        self.min_step = min_step
-        self.download_weight = download_weight
-        self.last = 0.0  # start_download_async resets stored progress to 0
-
-    def __call__(self, percent: float) -> None:
-        value = max(0.0, min(100.0, percent))
-        if value < self.last + self.min_step and not (value == 100.0 > self.last):
-            return
-        self.last = value
-        CodecUrls.objects.filter(pk=self.codecurl_id).update(
-            progress=value, updated_at=timezone.now()
-        )
-
-    def download(self, percent: float) -> None:
-        self(percent * self.download_weight)
-
-    def post_process(self, percent: float) -> None:
-        base = self.download_weight * 100
-        self(base + percent * (100 - base) / 100)
 
 
 def _fetch_and_process(codecurl, profile, paths, progress, runner) -> str:
@@ -112,7 +84,7 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
     try:
         codecurl = CodecUrls.objects.get(pk=codecurl_id)
         profile = get_profile(codecurl.output_profile)
-        progress = _ProgressSaver(codecurl_id, download_weight=profile.download_weight)
+        progress = ProgressReporter(codecurl_id, download_weight=profile.download_weight)
         paths = storage.job_paths(codecurl_id, profile)
         destination = paths.final
 

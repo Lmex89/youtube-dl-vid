@@ -47,7 +47,7 @@ class JobProgressTests(TestCase):
             [{"progress": [b"[download] 100%"]}, {"log": "10.0"}, {}],
         )
         self.assertEqual(outcome, "succeeded")
-        self.assertEqual(saved, [75.0, 100.0, 100.0])
+        self.assertEqual(saved, [75.0, 99.99, 100.0])
 
     def test_standard_download_saves_throttled_progress_and_success(self):
         outcome, codecurl, saved = self.run_with_progress(
@@ -64,16 +64,51 @@ class JobProgressTests(TestCase):
         self.assertEqual(codecurl.status, StatusCodec.SUCCESS)
         self.assertTrue(VideosUploaded.objects.filter(codecurl=codecurl).exists())
 
-    def test_standard_keeps_download_100_and_success_writes(self):
+    def test_standard_reserves_100_for_success(self):
         outcome, _, saved = self.run_with_progress(
             OutputProfile.STANDARD_VIDEO,
             [{"progress": [b"[download] 100%"]}],
         )
         self.assertEqual(outcome, "succeeded")
-        self.assertEqual(saved, [100.0, 100.0])
+        self.assertEqual(saved, [99.99, 100.0])
         self.assertEqual(self.saved_states, [
             (StatusCodec.PENDING, False), (StatusCodec.SUCCESS, True),
         ])
+
+    def test_completion_bypasses_minimum_step(self):
+        outcome, _, saved = self.run_with_progress(
+            OutputProfile.STANDARD_VIDEO,
+            [{"progress": [b"[download] 99.5%", b"[download] 100%"]}],
+        )
+        self.assertEqual(outcome, "succeeded")
+        self.assertEqual(saved, [99.5, 100.0])
+
+    def test_noisy_progress_stream_is_throttled(self):
+        stream = [f"[download] {i / 10}%".encode() for i in range(1001)]
+        outcome, _, saved = self.run_with_progress(
+            OutputProfile.STANDARD_VIDEO, [{"progress": stream}],
+        )
+        self.assertEqual(outcome, "succeeded")
+        self.assertLessEqual(len(saved), 101)
+        self.assertEqual(saved[-1], 100.0)
+
+    def test_progress_is_bounded_and_monotonic_for_each_profile(self):
+        for profile in OutputProfile:
+            with self.subTest(profile=profile):
+                outcome, _, saved = self.run_with_progress(
+                    profile,
+                    [{"progress": [b"[download] -5%", b"[download] 60%",
+                                   b"[download] 20%", b"[download] 150%"]},
+                     {"log": "10.0"}, {}],
+                )
+                self.assertEqual(outcome, "succeeded")
+                self.assertEqual(saved, sorted(saved))
+                self.assertTrue(all(0 <= value <= 100 for value in saved))
+                self.assertEqual(saved[-1], 100.0)
+                self.assertTrue(all(value < 100 for value in saved[:-1]))
+                self.assertEqual(self.saved_states[-1], (StatusCodec.SUCCESS, True))
+                self.assertTrue(all(state == (StatusCodec.PENDING, False)
+                                    for state in self.saved_states[:-1]))
 
     def test_audio_download_and_post_process_progress(self):
         outcome, codecurl, saved = self.run_with_progress(
@@ -81,7 +116,7 @@ class JobProgressTests(TestCase):
             [{"progress": [b"[download] 40%", b"[download] 100%"]}],
         )
         self.assertEqual(outcome, "succeeded")
-        self.assertEqual(saved, [36.0, 90.0, 100.0, 100.0])
+        self.assertEqual(saved, [36.0, 90.0, 99.99, 100.0])
         upload = VideosUploaded.objects.get(codecurl=codecurl)
         self.assertTrue(upload.file_path.endswith(f"{codecurl.id}.m4a"))
         self.assertEqual(upload.mime_type, "audio/mp4")
@@ -94,7 +129,7 @@ class JobProgressTests(TestCase):
              {"progress": [b"out_time_us=3000000", b"out_time_us=10000000"]}],
         )
         self.assertEqual(outcome, "succeeded")
-        self.assertEqual(saved, [15.0, 75.0, 82.5, 100.0, 100.0])
+        self.assertEqual(saved, [15.0, 75.0, 82.5, 99.99, 100.0])
         upload = VideosUploaded.objects.get(codecurl=codecurl)
         self.assertTrue(upload.file_path.endswith(f"{codecurl.id}.mp4"))
         self.assertEqual(upload.mime_type, "video/mp4")
@@ -108,7 +143,7 @@ class JobProgressTests(TestCase):
                            b"out_time_us=10000000"]}],
         )
         self.assertEqual(outcome, "succeeded")
-        self.assertEqual(saved, [75.0, 87.5, 92.5, 100.0, 100.0])
+        self.assertEqual(saved, [75.0, 87.5, 92.5, 99.99, 100.0])
 
     def test_failed_post_process_preserves_last_saved_progress(self):
         outcome, codecurl, saved = self.run_with_progress(
@@ -124,7 +159,32 @@ class JobProgressTests(TestCase):
         self.assertEqual(codecurl.progress, 85.0)
         self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
 
-    def test_failed_ladder_preserves_100_from_an_earlier_attempt(self):
+    def test_failed_download_after_full_progress_is_not_complete(self):
+        for profile in OutputProfile:
+            with self.subTest(profile=profile):
+                outcome, codecurl, saved = self.run_with_progress(
+                    profile,
+                    [{"progress": [b"[download] 100%"], "fail": True}],
+                )
+                self.assertEqual(outcome, "failed")
+                self.assertEqual(codecurl.status, StatusCodec.ERROR)
+                self.assertTrue(saved)
+                self.assertLess(codecurl.progress, 100.0)
+                self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
+
+    def test_failed_encode_after_full_progress_is_not_complete(self):
+        outcome, codecurl, saved = self.run_with_progress(
+            OutputProfile.WHATSAPP_VIDEO,
+            [{"progress": [b"[download] 100%"]}, {"log": "10.0"},
+             {"progress": [b"out_time_us=10000000"], "fail": True}],
+        )
+        self.assertEqual(outcome, "failed")
+        self.assertEqual(saved, [75.0, 99.99])
+        self.assertEqual(codecurl.status, StatusCodec.ERROR)
+        self.assertLess(codecurl.progress, 100.0)
+        self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
+
+    def test_failed_ladder_does_not_report_completion(self):
         oversized = {
             "progress": [b"out_time_us=10000000"], "output_content": b"x" * 500
         }
@@ -134,6 +194,6 @@ class JobProgressTests(TestCase):
              oversized, oversized, oversized],
         )
         self.assertEqual(outcome, "failed")
-        self.assertEqual(saved, [75.0, 100.0])
+        self.assertEqual(saved, [75.0, 99.99])
         self.assertEqual(codecurl.status, StatusCodec.ERROR)
-        self.assertEqual(codecurl.progress, 100.0)
+        self.assertEqual(codecurl.progress, 99.99)

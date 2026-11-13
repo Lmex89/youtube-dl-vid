@@ -942,51 +942,6 @@ class GetJobStateTests(TestCase):
         self.assertEqual((data["status"], data["progress"]), (1, 99.0))
 
 
-class ProgressSaverTests(TestCase):
-    def _saver(self):
-        from videos.job_run import _ProgressSaver
-
-        codecurl = CodecUrls.objects.create(url="https://example.com")
-        return codecurl, _ProgressSaver(str(codecurl.id))
-
-    def test_clamps_out_of_range(self):
-        codecurl, save = self._saver()
-        save(150.0)
-        codecurl.refresh_from_db()
-        self.assertEqual(codecurl.progress, 100.0)
-        save(-5.0)
-        codecurl.refresh_from_db()
-        self.assertEqual(codecurl.progress, 100.0)
-
-    def test_never_decreases(self):
-        codecurl, save = self._saver()
-        save(60.0)
-        save(20.0)
-        codecurl.refresh_from_db()
-        self.assertEqual(codecurl.progress, 60.0)
-
-    def test_noisy_stream_is_throttled(self):
-        from django.db import connection
-        from django.test.utils import CaptureQueriesContext
-
-        codecurl, save = self._saver()
-        stream = [i / 10 for i in range(1001)]  # 0.0 .. 100.0 in 0.1 steps
-        with CaptureQueriesContext(connection) as ctx:
-            for pct in stream:
-                save(pct)
-        writes = [q for q in ctx.captured_queries if q["sql"].startswith("UPDATE")]
-        self.assertLessEqual(len(writes), 101)
-        codecurl.refresh_from_db()
-        self.assertEqual(codecurl.progress, 100.0)
-
-    def test_completion_bypasses_minimum_step(self):
-        codecurl, save = self._saver()
-        save(99.5)
-        save(100.0)
-        codecurl.refresh_from_db()
-        self.assertEqual(codecurl.progress, 100.0)
-
-
 class SupersedeOnSuccessTests(DownloadJobTestCase):
     """A successful job replaces earlier jobs for the same URL and profile."""
 
