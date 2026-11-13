@@ -1,5 +1,10 @@
+import json
+from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Optional
+
+from django.db import OperationalError
+from loguru import logger
 
 from videos.process import (
     ProgressCallback,
@@ -7,6 +12,59 @@ from videos.process import (
     SLOW_PROCESS_THRESHOLD_MS,
 )
 from videos.runner import CommandRunner
+
+
+def fail_success_write(before_fail=None):
+    """Execute wrapper failing the request row's success UPDATE.
+
+    *before_fail*, if given, runs right before the failing statement executes.
+    """
+
+    def wrapper(execute, sql, params, many, context):
+        if (sql.startswith('UPDATE "videos_codecurls"')
+                and '"status"' in sql and '"progress"' in sql):
+            if before_fail is not None:
+                before_fail()
+            return execute("SELECT * FROM nonexistent_success_write_table",
+                           None, many, context)
+        return execute(sql, params, many, context)
+
+    return wrapper
+
+
+def first_commit_fails(connection, message="commit not applied", apply_first=False):
+    """Commit side effect raising on the first call, delegating afterwards.
+
+    When *apply_first* is true the commit executes before the failure, so the
+    transaction is applied and only the acknowledgement is lost.
+    """
+    real_commit = connection.commit
+    calls = []
+
+    def side_effect():
+        calls.append(True)
+        if len(calls) == 1:
+            if apply_first:
+                real_commit()
+            raise OperationalError(message)
+        return real_commit()
+
+    return side_effect, calls
+
+
+@contextmanager
+def capture_job_run_logs(level="ERROR"):
+    """Capture job_run.py Loguru events as parsed JSON dicts."""
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(json.loads(message.record["message"])),
+        level=level,
+        filter=lambda record: record["name"] == "videos.job_run",
+    )
+    try:
+        yield messages
+    finally:
+        logger.remove(sink)
 
 
 class FakeCommandRunner(CommandRunner):

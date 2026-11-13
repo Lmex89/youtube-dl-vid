@@ -62,6 +62,7 @@ def setup_logging(log_dir: str = "/var/log/gunicorn") -> None:
         ),
         level="DEBUG",
         colorize=False,
+        diagnose=False,
         enqueue=True,
     )
 
@@ -72,6 +73,7 @@ def setup_logging(log_dir: str = "/var/log/gunicorn") -> None:
         retention="30 days",
         level="INFO",
         serialize=True,
+        diagnose=False,
         enqueue=True,
     )
 
@@ -81,6 +83,7 @@ def setup_logging(log_dir: str = "/var/log/gunicorn") -> None:
         retention="90 days",
         level="ERROR",
         serialize=True,
+        diagnose=False,
         enqueue=True,
     )
 
@@ -90,6 +93,7 @@ def setup_logging(log_dir: str = "/var/log/gunicorn") -> None:
         retention="7 days",
         level="DEBUG",
         serialize=True,
+        diagnose=False,
         enqueue=True,
     )
 
