@@ -5,12 +5,13 @@ from unittest.mock import patch
 
 from django.db import connection
 from django.test import TestCase
-from loguru import logger
 
 from videos.job_run import run_job
 from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
 from videos.storage import DownloadRetention, DownloadStorage
-from videos.test_utils import FakeCommandRunner
+from videos.test_utils import (
+    FakeCommandRunner, capture_job_run_logs, fail_success_write,
+)
 
 
 class JobFailureAndTitleTests(TestCase):
@@ -83,12 +84,6 @@ class JobFailureAndTitleTests(TestCase):
         self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
 
     def test_failed_success_write_rolls_back_upload_and_marks_error(self):
-        messages = []
-        sink = logger.add(
-            messages.append, level="INFO",
-            filter=lambda record: record["name"] == "videos.job_run",
-        )
-        self.addCleanup(logger.remove, sink)
         for profile, extension in [
             (OutputProfile.STANDARD_VIDEO, "mp4"), (OutputProfile.WHATSAPP_VIDEO, "mp4"),
             (OutputProfile.AUDIO_M4A, "m4a"),
@@ -99,24 +94,21 @@ class JobFailureAndTitleTests(TestCase):
                 )
                 self.assertEqual(self.run_job(previous, FakeCommandRunner()), "succeeded")
                 previous_file = Path(VideosUploaded.objects.get(codecurl=previous).file_path)
-                messages.clear()
                 codecurl = CodecUrls.objects.create(
                     url="https://example.com/video", output_profile=profile
                 )
                 staging = self.storage.staging_root / str(codecurl.id)
                 saw_upload = []
 
-                def fail_success_write(execute, sql, params, many, context):
-                    if (sql.startswith('UPDATE "videos_codecurls"')
-                            and '"status"' in sql and '"progress"' in sql):
-                        saw_upload.append(VideosUploaded.objects.filter(codecurl=codecurl).exists())
-                        return execute("SELECT * FROM nonexistent_success_write_table", None, many, context)
-                    return execute(sql, params, many, context)
-
-                with connection.execute_wrapper(fail_success_write):
-                    outcome = self.run_job(codecurl, FakeCommandRunner(scripts=[
-                        {"progress": [b"[download] 100%"]}, {"log": "10.0"}, {},
-                    ]))
+                with capture_job_run_logs("INFO") as events:
+                    with connection.execute_wrapper(fail_success_write(
+                        lambda: saw_upload.append(
+                            VideosUploaded.objects.filter(codecurl=codecurl).exists()
+                        )
+                    )):
+                        outcome = self.run_job(codecurl, FakeCommandRunner(scripts=[
+                            {"progress": [b"[download] 100%"]}, {"log": "10.0"}, {},
+                        ]))
 
                 codecurl.refresh_from_db()
                 self.assertEqual(saw_upload, [True])
@@ -128,7 +120,6 @@ class JobFailureAndTitleTests(TestCase):
                 self.assertFalse((self.storage.downloads_dir / f"{codecurl.id}.{extension}").exists())
                 self.assertTrue(previous_file.is_file())
                 self.assertTrue(VideosUploaded.objects.filter(codecurl=previous).exists())
-                events = [json.loads(message.record["message"]) for message in messages]
                 self.assertEqual([event["event"] for event in events], [
                     "download_pipeline_started", "video_download_failed",
                 ])
@@ -151,19 +142,9 @@ class JobFailureAndTitleTests(TestCase):
                 raise PermissionError("secret")
             return unlink(path, *args, **kwargs)
 
-        def fail_success_write(execute, sql, params, many, context):
-            if (sql.startswith('UPDATE "videos_codecurls"')
-                    and '"status"' in sql and '"progress"' in sql):
-                return execute("SELECT * FROM nonexistent_success_write_table", None, many, context)
-            return execute(sql, params, many, context)
-
-        messages = []
-        sink = logger.add(messages.append, level="ERROR",
-                          filter=lambda record: record["name"] == "videos.job_run")
-        self.addCleanup(logger.remove, sink)
-        with connection.execute_wrapper(fail_success_write):
-            with patch.object(Path, "unlink", autospec=True, side_effect=refuse_final):
-                with self.assertLogs("videos", level="ERROR") as logs:
+        with capture_job_run_logs() as events:
+            with connection.execute_wrapper(fail_success_write()):
+                with patch.object(Path, "unlink", autospec=True, side_effect=refuse_final):
                     outcome = self.run_job(codecurl, FakeCommandRunner(scripts=[{}, {}, {}]))
 
         codecurl.refresh_from_db()
@@ -172,13 +153,12 @@ class JobFailureAndTitleTests(TestCase):
         self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
         self.assertTrue(final.is_file())
         self.assertFalse(staging.exists())
-        self.assertEqual([json.loads(r.getMessage()) for r in logs.records], [{
+        self.assertEqual(events[0], {
             "event": "download_final_cleanup_failed",
             "codecurl_id": str(codecurl.id),
             "error_type": "PermissionError",
             "request_id": "request-45",
-        }])
-        events = [json.loads(message.record["message"]) for message in messages]
+        })
         self.assertEqual(events[-1]["event"], "video_download_failed")
         self.assertEqual(events[-1]["error_type"], "ProgrammingError")
         self.assertEqual(events[-1]["request_id"], "request-45")
@@ -279,17 +259,14 @@ class JobFailureAndTitleTests(TestCase):
                 CodecUrls.objects.filter(pk=codecurl.pk).delete()
                 return super().run(command, log_path, label, timeout, *args, **kwargs)
 
-        messages = []
-        sink = logger.add(messages.append, level="ERROR")
-        self.addCleanup(logger.remove, sink)
-        outcome = self.run_job(codecurl, DeletingRunner(scripts=[{}, {}, {}]))
+        with capture_job_run_logs() as events:
+            outcome = self.run_job(codecurl, DeletingRunner(scripts=[{}, {}, {}]))
 
         self.assertEqual(outcome, "failed")
         self.assertFalse(CodecUrls.objects.filter(pk=codecurl.pk).exists())
         self.assertFalse(VideosUploaded.objects.filter(codecurl_id=codecurl.pk).exists())
         self.assertFalse(staging.exists())
         self.assertTrue(self.storage.downloads_dir.exists())
-        events = [json.loads(message.record["message"]) for message in messages]
         self.assertTrue(any(
             event.get("event") == "video_download_failed"
             and event.get("error_type") == "DoesNotExist"

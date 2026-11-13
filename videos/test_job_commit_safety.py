@@ -1,4 +1,3 @@
-import json
 import tempfile
 import threading
 import time
@@ -8,12 +7,14 @@ from unittest.mock import patch
 
 from django.db import OperationalError, connection, connections, transaction
 from django.test import TransactionTestCase
-from loguru import logger
 
 from videos.job_run import run_job
 from videos.models import CodecUrls, StatusCodec, VideosUploaded
 from videos.storage import DownloadRetention, DownloadStorage
-from videos.test_utils import FakeCommandRunner
+from videos.test_utils import (
+    FakeCommandRunner, capture_job_run_logs, fail_success_write,
+    first_commit_fails,
+)
 
 
 class JobCommitSafetyTests(TransactionTestCase):
@@ -33,23 +34,13 @@ class JobCommitSafetyTests(TransactionTestCase):
         self.assertEqual(self.run_job(previous), "succeeded")
         previous_file = Path(VideosUploaded.objects.get(codecurl=previous).file_path)
         codecurl = CodecUrls.objects.create(url=previous.url)
-        commit = connection.commit
-        calls = []
 
-        def commit_then_fail():
-            commit()
-            calls.append(True)
-            if len(calls) == 1:
-                raise OperationalError("commit acknowledgement lost")
-
-        messages = []
-        sink = logger.add(
-            messages.append, level="ERROR",
-            filter=lambda record: record["name"] == "videos.job_run",
+        side_effect, _ = first_commit_fails(
+            connection, "commit acknowledgement lost", apply_first=True
         )
-        self.addCleanup(logger.remove, sink)
-        with patch.object(connection, "commit", side_effect=commit_then_fail):
-            outcome = self.run_job(codecurl)
+        with capture_job_run_logs() as messages:
+            with patch.object(connection, "commit", side_effect=side_effect):
+                outcome = self.run_job(codecurl)
 
         codecurl.refresh_from_db()
         upload = VideosUploaded.objects.get(codecurl=codecurl)
@@ -68,13 +59,7 @@ class JobCommitSafetyTests(TransactionTestCase):
         codecurl = CodecUrls.objects.create(url=previous.url)
         final = self.storage.downloads_dir / f"{codecurl.id}.mp4"
 
-        def fail_write(execute, sql, params, many, context):
-            if (sql.startswith('UPDATE "videos_codecurls"')
-                    and '"status"' in sql and '"progress"' in sql):
-                return execute("SELECT * FROM nonexistent_success_write_table", None, many, context)
-            return execute(sql, params, many, context)
-
-        with connection.execute_wrapper(fail_write):
+        with connection.execute_wrapper(fail_success_write()):
             outcome = self.run_job(codecurl)
 
         codecurl.refresh_from_db()
@@ -104,15 +89,9 @@ class JobCommitSafetyTests(TransactionTestCase):
                 raise OperationalError("database unavailable")
             return execute(sql, params, many, context)
 
-        messages = []
-        sink = logger.add(
-            messages.append, level="ERROR",
-            filter=lambda record: record["name"] == "videos.job_run",
-        )
-        self.addCleanup(logger.remove, sink)
-        with connection.execute_wrapper(reject_queries):
-            with patch.object(connection, "commit", side_effect=commit_then_lose_connection):
-                with self.assertLogs("videos", level="ERROR") as logs:
+        with capture_job_run_logs() as messages:
+            with connection.execute_wrapper(reject_queries):
+                with patch.object(connection, "commit", side_effect=commit_then_lose_connection):
                     outcome = self.run_job(codecurl)
 
         codecurl.refresh_from_db()
@@ -124,26 +103,30 @@ class JobCommitSafetyTests(TransactionTestCase):
         self.assertTrue(final.is_file())
         self.assertTrue(previous_file.is_file())
         self.assertTrue(VideosUploaded.objects.filter(codecurl=previous).exists())
-        self.assertEqual([json.loads(r.getMessage()) for r in logs.records], [{
-            "event": "download_success_unconfirmed",
-            "codecurl_id": str(codecurl.id),
-            "error_type": "OperationalError",
-            "request_id": "request-safety",
-        }])
-        self.assertEqual([json.loads(message.record["message"]) for message in messages], [{
-            "event": "video_download_failed",
-            "codecurl_id": str(codecurl.id),
-            "error": "commit acknowledgement lost",
-            "error_type": "OperationalError",
-            "request_id": "request-safety",
-        }])
+        self.assertEqual(messages, [
+            {
+                "event": "download_success_unconfirmed",
+                "codecurl_id": str(codecurl.id),
+                "error_type": "OperationalError",
+                "request_id": "request-safety",
+            },
+            {
+                "event": "video_download_failed",
+                "codecurl_id": str(codecurl.id),
+                "error": "commit acknowledgement lost",
+                "error_type": "OperationalError",
+                "request_id": "request-safety",
+            },
+        ])
 
     def test_unconfirmed_commit_without_success_keeps_pending_and_file(self):
         codecurl = CodecUrls.objects.create(url="https://example.com/video")
         final = self.storage.downloads_dir / f"{codecurl.id}.mp4"
 
-        with patch.object(connection, "commit", side_effect=OperationalError("connection lost")):
-            with self.assertLogs("videos", level="ERROR"):
+        with capture_job_run_logs():
+            with patch.object(
+                connection, "commit", side_effect=OperationalError("connection lost")
+            ):
                 outcome = self.run_job(codecurl)
 
         codecurl.refresh_from_db()
@@ -158,23 +141,11 @@ class JobCommitSafetyTests(TransactionTestCase):
         previous_file = Path(VideosUploaded.objects.get(codecurl=previous).file_path)
         codecurl = CodecUrls.objects.create(url=previous.url)
         final = self.storage.downloads_dir / f"{codecurl.id}.mp4"
-        commit = connection.commit
-        calls = []
 
-        def fail_first_commit():
-            calls.append(True)
-            if len(calls) == 1:
-                raise OperationalError("commit not applied")
-            return commit()
-
-        messages = []
-        sink = logger.add(
-            messages.append, level="ERROR",
-            filter=lambda record: record["name"] == "videos.job_run",
-        )
-        self.addCleanup(logger.remove, sink)
-        with patch.object(connection, "commit", side_effect=fail_first_commit):
-            outcome = self.run_job(codecurl)
+        side_effect, _ = first_commit_fails(connection)
+        with capture_job_run_logs() as messages:
+            with patch.object(connection, "commit", side_effect=side_effect):
+                outcome = self.run_job(codecurl)
 
         codecurl.refresh_from_db()
         self.assertEqual(outcome, "failed")
@@ -183,7 +154,7 @@ class JobCommitSafetyTests(TransactionTestCase):
         self.assertFalse(final.exists())
         self.assertTrue(previous_file.is_file())
         self.assertTrue(VideosUploaded.objects.filter(codecurl=previous).exists())
-        self.assertEqual([json.loads(m.record["message"]) for m in messages], [{
+        self.assertEqual(messages, [{
             "event": "video_download_failed",
             "codecurl_id": str(codecurl.id),
             "error": "commit not applied",
@@ -204,14 +175,8 @@ class JobCommitSafetyTests(TransactionTestCase):
             commit()
             raise OperationalError("reconciliation acknowledgement lost")
 
-        messages = []
-        sink = logger.add(
-            messages.append, level="ERROR",
-            filter=lambda record: record["name"] == "videos.job_run",
-        )
-        self.addCleanup(logger.remove, sink)
-        with patch.object(connection, "commit", side_effect=lose_acknowledgements):
-            with self.assertLogs("videos", level="ERROR") as logs:
+        with capture_job_run_logs() as messages:
+            with patch.object(connection, "commit", side_effect=lose_acknowledgements):
                 outcome = self.run_job(codecurl)
 
         codecurl.refresh_from_db()
@@ -220,31 +185,30 @@ class JobCommitSafetyTests(TransactionTestCase):
         self.assertEqual(codecurl.status, StatusCodec.ERROR)
         self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
         self.assertTrue(final.is_file())
-        self.assertEqual(json.loads(logs.records[0].getMessage())["event"],
-                         "download_success_unconfirmed")
-        self.assertEqual([json.loads(m.record["message"]) for m in messages], [{
-            "event": "video_download_failed",
-            "codecurl_id": str(codecurl.id),
-            "error": "original commit not applied",
-            "error_type": "OperationalError",
-            "request_id": "request-safety",
-        }])
+        self.assertEqual(messages, [
+            {
+                "event": "download_success_unconfirmed",
+                "codecurl_id": str(codecurl.id),
+                "error_type": "OperationalError",
+                "request_id": "request-safety",
+            },
+            {
+                "event": "video_download_failed",
+                "codecurl_id": str(codecurl.id),
+                "error": "original commit not applied",
+                "error_type": "OperationalError",
+                "request_id": "request-safety",
+            },
+        ])
 
     def test_pending_request_with_upload_remains_unconfirmed(self):
         codecurl = CodecUrls.objects.create(url="https://example.com/video")
         upload = VideosUploaded.objects.create(codecurl=codecurl, title="Existing")
         final = self.storage.downloads_dir / f"{codecurl.id}.mp4"
-        commit = connection.commit
-        calls = []
 
-        def fail_first_commit():
-            calls.append(True)
-            if len(calls) == 1:
-                raise OperationalError("commit not applied")
-            return commit()
-
-        with patch.object(connection, "commit", side_effect=fail_first_commit):
-            with self.assertLogs("videos", level="ERROR"):
+        side_effect, _ = first_commit_fails(connection)
+        with capture_job_run_logs():
+            with patch.object(connection, "commit", side_effect=side_effect):
                 outcome = self.run_job(codecurl)
 
         codecurl.refresh_from_db()
@@ -279,14 +243,7 @@ class JobCommitSafetyTests(TransactionTestCase):
         holder = threading.Thread(target=finish_success)
 
         def run_with_uncertain_commit():
-            commit, rollback = connection.commit, connection.rollback
-            calls = []
-
-            def fail_first_commit():
-                calls.append(True)
-                if len(calls) == 1:
-                    raise OperationalError("commit acknowledgement lost")
-                return commit()
+            rollback = connection.rollback
 
             def rollback_then_hold_row():
                 rollback()
@@ -300,8 +257,11 @@ class JobCommitSafetyTests(TransactionTestCase):
                 return execute(sql, params, many, context)
 
             try:
+                side_effect, _ = first_commit_fails(
+                    connection, "commit acknowledgement lost"
+                )
                 with connection.execute_wrapper(observe_lock):
-                    with patch.object(connection, "commit", side_effect=fail_first_commit):
+                    with patch.object(connection, "commit", side_effect=side_effect):
                         with patch.object(connection, "rollback", side_effect=rollback_then_hold_row):
                             outcomes.append(self.run_job(codecurl))
             except Exception as exc:
@@ -356,14 +316,7 @@ class JobCommitSafetyTests(TransactionTestCase):
                 connections.close_all()
 
         holder = threading.Thread(target=finish_success)
-        commit, rollback = connection.commit, connection.rollback
-        calls = []
-
-        def fail_first_commit():
-            calls.append(True)
-            if len(calls) == 1:
-                raise OperationalError("commit acknowledgement lost")
-            return commit()
+        rollback = connection.rollback
 
         def rollback_then_hold_row():
             rollback()
@@ -382,20 +335,17 @@ class JobCommitSafetyTests(TransactionTestCase):
                     lock_errors.append(exc)
                 raise
 
-        messages = []
-        sink = logger.add(
-            messages.append, level="ERROR",
-            filter=lambda record: record["name"] == "videos.job_run",
-        )
-        self.addCleanup(logger.remove, sink)
         with connection.cursor() as cursor:
             cursor.execute("SHOW lock_timeout")
             original_timeout = cursor.fetchone()[0]
         try:
-            with connection.execute_wrapper(capture_lock_error):
-                with patch.object(connection, "commit", side_effect=fail_first_commit):
-                    with patch.object(connection, "rollback", side_effect=rollback_then_hold_row):
-                        with self.assertLogs("videos", level="ERROR") as logs:
+            side_effect, _ = first_commit_fails(
+                connection, "commit acknowledgement lost"
+            )
+            with capture_job_run_logs() as messages:
+                with connection.execute_wrapper(capture_lock_error):
+                    with patch.object(connection, "commit", side_effect=side_effect):
+                        with patch.object(connection, "rollback", side_effect=rollback_then_hold_row):
                             started = time.monotonic()
                             outcome = self.run_job(codecurl)
                             elapsed = time.monotonic() - started
@@ -419,19 +369,21 @@ class JobCommitSafetyTests(TransactionTestCase):
         self.assertEqual(codecurl.progress, 100.0)
         self.assertTrue(VideosUploaded.objects.filter(codecurl=codecurl, file_path=str(final)).exists())
         self.assertTrue(final.is_file())
-        self.assertEqual([json.loads(r.getMessage()) for r in logs.records], [{
-            "event": "download_success_unconfirmed",
-            "codecurl_id": str(codecurl.id),
-            "error_type": "OperationalError",
-            "request_id": "request-safety",
-        }])
-        self.assertEqual([json.loads(m.record["message"]) for m in messages], [{
-            "event": "video_download_failed",
-            "codecurl_id": str(codecurl.id),
-            "error": "commit acknowledgement lost",
-            "error_type": "OperationalError",
-            "request_id": "request-safety",
-        }])
+        self.assertEqual(messages, [
+            {
+                "event": "download_success_unconfirmed",
+                "codecurl_id": str(codecurl.id),
+                "error_type": "OperationalError",
+                "request_id": "request-safety",
+            },
+            {
+                "event": "video_download_failed",
+                "codecurl_id": str(codecurl.id),
+                "error": "commit acknowledgement lost",
+                "error_type": "OperationalError",
+                "request_id": "request-safety",
+            },
+        ])
         with connection.cursor() as cursor:
             cursor.execute("SHOW lock_timeout")
             self.assertEqual(cursor.fetchone()[0], original_timeout)
