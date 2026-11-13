@@ -12,7 +12,7 @@ from videos.test_utils import FakeCommandRunner
 
 @override_settings(WHATSAPP_MEDIA_MAX_BYTES=100)
 class JobProgressTests(TestCase):
-    def run_with_progress(self, profile, scripts):
+    def run_with_progress(self, profile, scripts, runner_factory=None):
         codecurl = CodecUrls.objects.create(
             url="https://example.com/video", output_profile=profile
         )
@@ -33,9 +33,11 @@ class JobProgressTests(TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             storage = DownloadStorage(Path(tmp) / "downloads", Path(tmp) / "logs")
+            runner = (runner_factory(scripts, codecurl) if runner_factory
+                      else FakeCommandRunner(scripts))
             with connection.execute_wrapper(capture):
                 outcome = run_job(
-                    str(codecurl.id), "request-48", runner=FakeCommandRunner(scripts),
+                    str(codecurl.id), "request-48", runner=runner,
                     storage=storage, retention=DownloadRetention(storage),
                 )
         codecurl.refresh_from_db()
@@ -97,7 +99,7 @@ class JobProgressTests(TestCase):
             with self.subTest(profile=profile):
                 outcome, _, saved = self.run_with_progress(
                     profile,
-                    [{"progress": [b"[download] -5%", b"[download] 60%",
+                    [{"progress": [b"[download] 60%",
                                    b"[download] 20%", b"[download] 150%"]},
                      {"log": "10.0"}, {}],
                 )
@@ -109,6 +111,38 @@ class JobProgressTests(TestCase):
                 self.assertEqual(self.saved_states[-1], (StatusCodec.SUCCESS, True))
                 self.assertTrue(all(state == (StatusCodec.PENDING, False)
                                     for state in self.saved_states[:-1]))
+
+    def test_numeric_negative_callbacks_never_rewind_progress(self):
+        for profile, weighted_progress in (
+            (OutputProfile.STANDARD_VIDEO, 60.0),
+            (OutputProfile.WHATSAPP_VIDEO, 45.0),
+            (OutputProfile.AUDIO_M4A, 54.0),
+        ):
+            with self.subTest(profile=profile):
+                samples = []
+
+                class NumericRunner(FakeCommandRunner):
+                    def __init__(self, scripts, codecurl):
+                        super().__init__(scripts)
+                        self.codecurl = codecurl
+
+                    def run(self, *args, **kwargs):
+                        if kwargs["label"] == "yt_dlp":
+                            for value in (-5.0, 60.0, -5.0, 20.0, 150.0):
+                                kwargs["progress_callback"](value)
+                                self.codecurl.refresh_from_db()
+                                samples.append(self.codecurl.progress)
+                        return super().run(*args, **kwargs)
+
+                outcome, _, saved = self.run_with_progress(
+                    profile, [{}, {"log": "10.0"}, {}], NumericRunner,
+                )
+                self.assertEqual(outcome, "succeeded")
+                self.assertEqual(samples, [0.0, weighted_progress, weighted_progress,
+                                           weighted_progress, 99.99])
+                self.assertTrue(all(0 <= value <= 100 for value in saved))
+                self.assertEqual(saved, sorted(saved))
+                self.assertEqual(saved[-1], 100.0)
 
     def test_audio_download_and_post_process_progress(self):
         outcome, codecurl, saved = self.run_with_progress(
