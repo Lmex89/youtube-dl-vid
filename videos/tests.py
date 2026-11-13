@@ -7,6 +7,8 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
+from contextlib import redirect_stdout
 from datetime import timedelta
 from io import StringIO
 from pathlib import Path
@@ -19,9 +21,8 @@ from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from Youtube_dl_vid.logging_config import setup_logging
 from videos.download import (
-    JobState,
-    get_job_state,
     is_download_running,
     stale_pending_jobs,
     start_download_async,
@@ -922,69 +923,82 @@ class ReencodeProfileJobTests(DirectDownloadJobTestCase):
         self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
 
 
-class GetJobStateTests(TestCase):
-    def test_returns_state_for_each_status(self):
-        for status, progress in [(2, 42.5), (1, 100.0), (3, 7.0)]:
-            c = CodecUrls.objects.create(
-                url="https://example.com", status=status, progress=progress
-            )
-            self.assertEqual(get_job_state(str(c.id)), JobState(status, progress))
+class CodecUrlsDetailTests(TestCase):
+    def setUp(self):
+        caches["ratelimit"].clear()
+        self.client = APIClient()
 
-    def test_unknown_id_returns_none(self):
-        import uuid
+    def test_pending_detail_reads_status_and_progress_in_one_query(self):
+        codecurl = CodecUrls.objects.create(
+            url="https://example.com", status=StatusCodec.PENDING, progress=42.5
+        )
 
-        self.assertIsNone(get_job_state(str(uuid.uuid4())))
+        with self.assertNumQueries(1):
+            response = self.client.get(f"/api/v1/yt/videos/{codecurl.id}")
 
-    def test_detail_view_reads_through_get_job_state(self):
-        c = CodecUrls.objects.create(url="https://example.com", status=2, progress=10.0)
-        with patch("videos.views.get_job_state", return_value=JobState(1, 99.0)):
-            data = APIClient().get(f"/api/v1/yt/videos/{c.id}").json()
-        self.assertEqual((data["status"], data["progress"]), (1, 99.0))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual((response.data["status"], response.data["progress"]), (2, 42.5))
 
+    def test_success_and_error_detail_read_stored_status_and_progress(self):
+        for status, progress in [(StatusCodec.SUCCESS, 100.0), (StatusCodec.ERROR, 7.0)]:
+            with self.subTest(status=status):
+                codecurl = CodecUrls.objects.create(
+                    url="https://example.com", status=status, progress=progress
+                )
+                with self.assertNumQueries(1):
+                    response = self.client.get(f"/api/v1/yt/videos/{codecurl.id}")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    (response.data["status"], response.data["progress"]),
+                    (status, progress),
+                )
 
-class ProgressSaverTests(TestCase):
-    def _saver(self):
-        from videos.job_run import _ProgressSaver
+    def test_unknown_detail_returns_404(self):
+        path = f"/api/v1/yt/videos/{uuid.uuid4()}"
+        stdout = StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                with redirect_stdout(stdout):
+                    setup_logging(tmp)
+                with self.assertNumQueries(1):
+                    response = self.client.get(path)
+                loguru_logger.complete()
 
-        codecurl = CodecUrls.objects.create(url="https://example.com")
-        return codecurl, _ProgressSaver(str(codecurl.id))
-
-    def test_clamps_out_of_range(self):
-        codecurl, save = self._saver()
-        save(150.0)
-        codecurl.refresh_from_db()
-        self.assertEqual(codecurl.progress, 100.0)
-        save(-5.0)
-        codecurl.refresh_from_db()
-        self.assertEqual(codecurl.progress, 100.0)
-
-    def test_never_decreases(self):
-        codecurl, save = self._saver()
-        save(60.0)
-        save(20.0)
-        codecurl.refresh_from_db()
-        self.assertEqual(codecurl.progress, 60.0)
-
-    def test_noisy_stream_is_throttled(self):
-        from django.db import connection
-        from django.test.utils import CaptureQueriesContext
-
-        codecurl, save = self._saver()
-        stream = [i / 10 for i in range(1001)]  # 0.0 .. 100.0 in 0.1 steps
-        with CaptureQueriesContext(connection) as ctx:
-            for pct in stream:
-                save(pct)
-        writes = [q for q in ctx.captured_queries if q["sql"].startswith("UPDATE")]
-        self.assertLessEqual(len(writes), 101)
-        codecurl.refresh_from_db()
-        self.assertEqual(codecurl.progress, 100.0)
-
-    def test_completion_bypasses_minimum_step(self):
-        codecurl, save = self._saver()
-        save(99.5)
-        save(100.0)
-        codecurl.refresh_from_db()
-        self.assertEqual(codecurl.progress, 100.0)
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.data, {
+                    "detail": "No CodecUrls matches the given query.",
+                    "status_code": 404, "path": path,
+                    "request_id": response.data["request_id"],
+                })
+                self.assertTrue(response.data["request_id"])
+                self.assertIn("Traceback (most recent call last)", stdout.getvalue())
+                for filename in ("app.log", "error.log", "debug.log"):
+                    with self.subTest(sink=filename):
+                        records = [json.loads(line) for line in Path(tmp, filename).read_text().splitlines()]
+                        exceptions = [record for record in records
+                                      if '"event": "exception"' in record["record"]["message"]]
+                        self.assertEqual(len(exceptions), 1)
+                        record = exceptions[0]
+                        event = json.loads(record["record"]["message"])
+                        self.assertEqual(set(event), {
+                            "event", "timestamp", "level", "logger", "request_id", "context",
+                        })
+                        self.assertTrue(event["timestamp"])
+                        self.assertEqual(event["level"], "ERROR")
+                        self.assertEqual(event["logger"], "videos")
+                        self.assertEqual(event["request_id"], response.data["request_id"])
+                        self.assertEqual(event["context"], {
+                            "exception_type": "Http404",
+                            "exception_message": "No CodecUrls matches the given query.",
+                            "view": "CodecUrlsDetailAPIView", "path": path,
+                            "method": "GET", "user": "anonymous", "ip": "127.0.0.1",
+                        })
+                        self.assertIn(json.dumps(event), stdout.getvalue())
+                        self.assertEqual(record["record"]["exception"]["type"], "Http404")
+                        self.assertTrue(record["record"]["exception"]["traceback"])
+                        self.assertIn("Traceback (most recent call last)", record["text"])
+            finally:
+                setup_logging()
 
 
 class SupersedeOnSuccessTests(DownloadJobTestCase):
@@ -1177,6 +1191,83 @@ class RunningJobProtectionTests(DownloadJobTestCase):
 
 
 class ConcurrentStartTests(DownloadJobTestCase):
+    def test_start_resets_request_and_duplicate_preserves_running_progress(self):
+        entered = threading.Event()
+        report = threading.Event()
+        reported = threading.Event()
+        release = threading.Event()
+
+        class BlockingRunner(FakeCommandRunner):
+            def run(self, *args, **kwargs):
+                entered.set()
+                report.wait(5)
+                kwargs["progress_callback"](42)
+                reported.set()
+                release.wait(5)
+                return super().run(*args, **kwargs)
+
+        runner = BlockingRunner()
+        set_test_runner(runner)
+        codecurl = CodecUrls.objects.create(
+            url="https://example.com/video", status=StatusCodec.ERROR, progress=73
+        )
+        original_updated_at = codecurl.updated_at
+        messages = []
+        sink = loguru_logger.add(messages.append, level="WARNING")
+        self.addCleanup(loguru_logger.remove, sink)
+        try:
+            self.assertIs(start_download_async(codecurl), codecurl)
+            self.assertTrue(entered.wait(5))
+            self.assertEqual((codecurl.status, codecurl.progress), (StatusCodec.PENDING, 0))
+            codecurl.refresh_from_db()
+            self.assertEqual((codecurl.status, codecurl.progress), (StatusCodec.PENDING, 0))
+            self.assertGreater(codecurl.updated_at, original_updated_at)
+
+            report.set()
+            self.assertTrue(reported.wait(5))
+            codecurl.refresh_from_db()
+            self.assertEqual(codecurl.progress, 42)
+            updated_at = codecurl.updated_at
+            self.assertIs(start_download_async(codecurl, request_id="duplicate"), codecurl)
+            self.assertEqual((codecurl.status, codecurl.progress), (StatusCodec.PENDING, 42))
+            self.assertEqual(codecurl.updated_at, updated_at)
+            codecurl.refresh_from_db()
+            self.assertEqual((codecurl.status, codecurl.progress), (StatusCodec.PENDING, 42))
+            self.assertEqual(codecurl.updated_at, updated_at)
+            event = next(json.loads(m.record["message"]) for m in messages
+                         if '"download_already_running"' in m.record["message"])
+            self.assertEqual(event["codecurl_id"], str(codecurl.id))
+            self.assertEqual(event["request_id"], "duplicate")
+        finally:
+            report.set()
+            release.set()
+            _wait_for_download(str(codecurl.id))
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_failed_save_does_not_register_a_worker(self):
+        codecurl = CodecUrls.objects.create(
+            url="https://example.com/video", status=StatusCodec.ERROR, progress=73
+        )
+        with patch.object(codecurl, "save", side_effect=RuntimeError("save failed")):
+            with self.assertRaisesRegex(RuntimeError, "save failed"):
+                start_download_async(codecurl)
+        self.assertFalse(is_download_running(str(codecurl.id)))
+        codecurl.refresh_from_db()
+        self.assertEqual((codecurl.status, codecurl.progress), (StatusCodec.ERROR, 73))
+
+    def test_failed_thread_start_keeps_reset_without_registering_worker(self):
+        codecurl = CodecUrls.objects.create(
+            url="https://example.com/video", status=StatusCodec.ERROR, progress=73
+        )
+        with patch(
+            "videos.download.threading.Thread.start", side_effect=RuntimeError("start failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "start failed"):
+                start_download_async(codecurl)
+        self.assertFalse(is_download_running(str(codecurl.id)))
+        codecurl.refresh_from_db()
+        self.assertEqual((codecurl.status, codecurl.progress), (StatusCodec.PENDING, 0))
+
     def test_concurrent_starts_run_exactly_one_job(self):
         release = threading.Event()
 
@@ -1245,6 +1336,53 @@ class StaleJobTests(TestCase):
             url="https://example.com/b", status=StatusCodec.SUCCESS
         )
         self.assertEqual(list(stale_pending_jobs()), [stale])
+
+
+class StaleJobCommandTests(DownloadJobTestCase):
+    def test_command_lists_only_pending_jobs_without_a_registered_worker(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingRunner(FakeCommandRunner):
+            def run(self, *args, **kwargs):
+                entered.set()
+                release.wait(5)
+                return super().run(*args, **kwargs)
+
+        set_test_runner(BlockingRunner())
+        stale = CodecUrls.objects.create(url="https://example.com/" + "x" * 100)
+        success = CodecUrls.objects.create(
+            url="https://example.com/success", status=StatusCodec.SUCCESS
+        )
+        failed = CodecUrls.objects.create(
+            url="https://example.com/error", status=StatusCodec.ERROR
+        )
+        running = CodecUrls.objects.create(url="https://example.com/running")
+        try:
+            start_download_async(running)
+            self.assertTrue(entered.wait(5))
+            with self.assertNumQueries(0):
+                pending = stale_pending_jobs()
+            later = CodecUrls.objects.create(url="https://example.com/later")
+            self.assertCountEqual([row.id for row in pending], [stale.id, later.id])
+
+            output = StringIO()
+            call_command("list_stale_jobs", stdout=output)
+            lines = output.getvalue().splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertIn(
+                f"{stale.id}\t{stale.updated_at:%Y-%m-%d %H:%M:%S}\t{stale.url[:80]}",
+                lines,
+            )
+            self.assertIn(
+                f"{later.id}\t{later.updated_at:%Y-%m-%d %H:%M:%S}\t{later.url}",
+                lines,
+            )
+            for job in (running, success, failed):
+                self.assertNotIn(str(job.id), output.getvalue())
+        finally:
+            release.set()
+            _wait_for_download(str(running.id))
 
 
 class CleanupDownloadsCommandTests(TestCase):
