@@ -55,23 +55,40 @@ class ProgressReporter:
         self(base + percent * (100 - base) / 100)
 
 
-@transaction.atomic
+class SuccessCommitUncertain(Exception):
+    """The success transaction may have committed despite an exception."""
+
+
 def record_success(codecurl_id: str, profile, destination: Path, title: str) -> CodecUrls:
-    codecurl = CodecUrls.objects.get(pk=codecurl_id)
-    VideosUploaded.objects.create(
-        file_path=str(destination),
-        mime_type=profile.mime_type,
-        title=title[:250],
-        codecurl=codecurl,
-    )
-    codecurl.status = _SUCCESS
-    codecurl.progress = 100.0
-    codecurl.save(update_fields=["status", "progress", "updated_at"])
-    return codecurl
+    written = False
+    try:
+        with transaction.atomic():
+            codecurl = CodecUrls.objects.get(pk=codecurl_id)
+            VideosUploaded.objects.create(
+                file_path=str(destination),
+                mime_type=profile.mime_type,
+                title=title[:250],
+                codecurl=codecurl,
+            )
+            codecurl.status = _SUCCESS
+            codecurl.progress = 100.0
+            codecurl.save(update_fields=["status", "progress", "updated_at"])
+            written = True
+        return codecurl
+    except Exception as exc:
+        if written:
+            raise SuccessCommitUncertain from exc
+        raise
+
+
+def confirmed_success(codecurl_id: str, destination: Path):
+    upload = VideosUploaded.objects.select_related("codecurl").filter(
+        codecurl_id=codecurl_id, codecurl__status=_SUCCESS, file_path=str(destination)
+    ).first()
+    return upload.codecurl if upload else None
 
 
 def mark_failed(codecurl_id: str) -> None:
-    codecurl = CodecUrls.objects.filter(pk=codecurl_id).first()
-    if codecurl:
-        codecurl.status = StatusCodec.ERROR
-        codecurl.save(update_fields=["status", "updated_at"])
+    CodecUrls.objects.filter(pk=codecurl_id).exclude(status=_SUCCESS).update(
+        status=StatusCodec.ERROR, updated_at=timezone.now()
+    )

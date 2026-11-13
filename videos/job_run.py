@@ -5,7 +5,10 @@ from enum import StrEnum
 from django.conf import settings
 from loguru import logger
 
-from videos.lifecycle import ProgressReporter, mark_failed, record_success
+from videos.lifecycle import (
+    ProgressReporter, SuccessCommitUncertain, confirmed_success, mark_failed,
+    record_success,
+)
 from videos.models import CodecUrls
 from videos.process import parse_yt_dlp_progress
 from videos.profiles import get_profile
@@ -82,6 +85,20 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
         title = _fetch_and_process(codecurl, profile, paths, progress, runner)
         try:
             codecurl = record_success(codecurl_id, profile, destination, title)
+        except SuccessCommitUncertain as exc:
+            try:
+                codecurl = confirmed_success(codecurl_id, destination)
+            except Exception:
+                codecurl = None
+            if codecurl is None:
+                # shortcut: unconfirmed commits need manual reconciliation; add recovery if needed.
+                cleanup_logger.error(json.dumps({
+                    "event": "download_success_unconfirmed",
+                    "codecurl_id": codecurl_id,
+                    "error_type": exc.__cause__.__class__.__name__,
+                    "request_id": request_id,
+                }))
+                return JobOutcome.FAILED
         except Exception:
             try:
                 destination.unlink(missing_ok=True)
