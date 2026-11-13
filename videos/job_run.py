@@ -1,4 +1,5 @@
 import json
+import logging
 from enum import StrEnum
 
 from django.conf import settings
@@ -9,6 +10,8 @@ from videos.models import CodecUrls
 from videos.process import parse_yt_dlp_progress
 from videos.profiles import get_profile
 from videos.storage import preview_url
+
+cleanup_logger = logging.getLogger("videos")
 
 
 class JobOutcome(StrEnum):
@@ -77,7 +80,19 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
         )
 
         title = _fetch_and_process(codecurl, profile, paths, progress, runner)
-        codecurl = record_success(codecurl_id, profile, destination, title)
+        try:
+            codecurl = record_success(codecurl_id, profile, destination, title)
+        except Exception:
+            try:
+                destination.unlink(missing_ok=True)
+            except Exception as cleanup_error:
+                cleanup_logger.error(json.dumps({
+                    "event": "download_final_cleanup_failed",
+                    "codecurl_id": codecurl_id,
+                    "error_type": cleanup_error.__class__.__name__,
+                    "request_id": request_id,
+                }))
+            raise
 
         discarded = False
         try:
