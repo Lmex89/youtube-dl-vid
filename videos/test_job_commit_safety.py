@@ -201,6 +201,34 @@ class JobCommitSafetyTests(TransactionTestCase):
             },
         ])
 
+    def test_request_already_failed_elsewhere_is_confirmed_and_cleans_file(self):
+        codecurl = CodecUrls.objects.create(url="https://example.com/video")
+        final = self.storage.downloads_dir / f"{codecurl.id}.mp4"
+
+        def mark_error_elsewhere():
+            CodecUrls.objects.filter(pk=codecurl.pk).update(status=StatusCodec.ERROR)
+            connections.close_all()
+
+        def fail_before_reconciliation(execute, sql, params, many, context):
+            if "FOR UPDATE" in sql:
+                marker = threading.Thread(target=mark_error_elsewhere)
+                marker.start()
+                marker.join(5)
+            return execute(sql, params, many, context)
+
+        side_effect, _ = first_commit_fails(connection)
+        with capture_job_run_logs() as messages:
+            with connection.execute_wrapper(fail_before_reconciliation):
+                with patch.object(connection, "commit", side_effect=side_effect):
+                    outcome = self.run_job(codecurl)
+
+        codecurl.refresh_from_db()
+        self.assertEqual(outcome, "failed")
+        self.assertEqual(codecurl.status, StatusCodec.ERROR)
+        self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
+        self.assertFalse(final.exists())
+        self.assertEqual([m["event"] for m in messages], ["video_download_failed"])
+
     def test_pending_request_with_upload_remains_unconfirmed(self):
         codecurl = CodecUrls.objects.create(url="https://example.com/video")
         upload = VideosUploaded.objects.create(codecurl=codecurl, title="Existing")

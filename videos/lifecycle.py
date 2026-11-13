@@ -87,7 +87,7 @@ def record_success(codecurl_id: str, profile, destination: Path, title: str) -> 
         raise
 
 
-def reconcile_success(codecurl_id: str):
+def reconcile_success(codecurl_id: str) -> CodecUrls | None:
     """Return the confirmed successful or failed request, or None if unknown."""
     with transaction.atomic():
         # Allow normal commits to finish without waiting indefinitely for a broken session.
@@ -101,7 +101,11 @@ def reconcile_success(codecurl_id: str):
             # The recorded upload row is authoritative; trust the database's
             # success instead of contradicting it when paths differ.
             return codecurl if uploads.exists() else None
-        if codecurl.status != StatusCodec.PENDING or uploads.exists():
+        if uploads.exists():
+            return None
+        if codecurl.status == StatusCodec.ERROR:
+            return codecurl  # already recorded as failed: the failure is confirmed
+        if codecurl.status != StatusCodec.PENDING:
             return None
         codecurl.status = StatusCodec.ERROR
         codecurl.save(update_fields=["status", "updated_at"])
