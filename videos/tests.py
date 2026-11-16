@@ -31,6 +31,7 @@ from videos.job_run import run_job
 from videos.media import probe_duration
 from videos.models import CodecUrls, OutputProfile, StatusCodec, VideosUploaded
 from videos.profiles import PROFILES, get_profile
+from videos import running_jobs
 from videos.runner import set_test_runner
 from videos.test_utils import FakeCommandRunner
 from videos.storage import (
@@ -318,6 +319,26 @@ class BuildCommandTests(TestCase):
         self.assertIn("--no-cache-dir", command)
         self.assertIn("--newline", command)
 
+    @override_settings(MAX_VIDEO_BYTES=500 * 1024 * 1024)
+    def test_standard_profile_caps_filesize_when_configured(self):
+        command = get_profile(OutputProfile.STANDARD_VIDEO).build_command(
+            "https://example.com/video",
+            Path("/tmp/downloads/video.mp4"),
+            Path("/tmp/downloads"),
+        )
+        self.assertEqual(
+            command[command.index("--max-filesize") + 1], str(500 * 1024 * 1024)
+        )
+
+    @override_settings(MAX_VIDEO_BYTES=0)
+    def test_standard_profile_has_no_filesize_cap_when_disabled(self):
+        command = get_profile(OutputProfile.STANDARD_VIDEO).build_command(
+            "https://example.com/video",
+            Path("/tmp/downloads/video.mp4"),
+            Path("/tmp/downloads"),
+        )
+        self.assertNotIn("--max-filesize", command)
+
     def test_whatsapp_profile_downloads_to_temporary_source(self):
         command = get_profile(OutputProfile.WHATSAPP_VIDEO).build_command(
             "https://example.com/video",
@@ -567,6 +588,20 @@ class VideosUploadedFileTests(TestCase):
         self.assertIn(f"{upload.id}.mp4", response["Content-Disposition"])
         self.assertEqual(
             b"".join(response.streaming_content), b"media-bytes"
+        )
+
+    def test_list_filters_by_codecurl_and_reports_size_bytes(self):
+        upload = self._upload_with_file(OutputProfile.STANDARD_VIDEO)
+        self._upload_with_file(OutputProfile.STANDARD_VIDEO, content=b"x")
+
+        response = self.client.get(
+            f"/api/v1/yt/videos-uploaded/?codecurl={upload.codecurl_id}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [(u["id"], u["size_bytes"]) for u in response.json()],
+            [(str(upload.id), len(b"media-bytes"))],
         )
 
     def test_whatsapp_video_served_with_profile_mime_and_extension(self):
@@ -1494,3 +1529,78 @@ class CleanupDownloadsCommandTests(TestCase):
         self.assertEqual(counts["files_deleted"], 0)
         self.assertEqual(counts["uploads_deleted"], 1)
         self.assertFalse(VideosUploaded.objects.filter(pk=orphan.pk).exists())
+
+
+class DeleteJobTests(DownloadJobTestCase):
+    """DELETE videos/<codecurl_id>: idempotent, owned files only, 409 while running."""
+
+    def _job(self, status=StatusCodec.SUCCESS, file_path="", with_upload=True):
+        codecurl = CodecUrls.objects.create(url="https://example.com/v", status=status)
+        upload = None
+        if with_upload:
+            Path(file_path).write_bytes(b"x")
+            upload = VideosUploaded.objects.create(
+                codecurl=codecurl, file_path=file_path, title="t"
+            )
+        return codecurl, upload
+
+    def delete(self, codecurl_id):
+        return self.client.delete(f"/api/v1/yt/videos/{codecurl_id}")
+
+    def test_delete_removes_rows_and_file_and_repeat_is_204(self):
+        path = self._downloads / "a.mp4"
+        codecurl, _ = self._job(file_path=str(path))
+
+        self.assertEqual(self.delete(codecurl.id).status_code, 204)
+        self.assertFalse(path.exists())
+        self.assertFalse(CodecUrls.objects.filter(pk=codecurl.pk).exists())
+        self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
+        self.assertEqual(self.delete(codecurl.id).status_code, 204)
+        self.assertEqual(self.delete(uuid.uuid4()).status_code, 204)
+
+    def test_delete_failed_job_without_file(self):
+        codecurl, _ = self._job(status=StatusCodec.ERROR, with_upload=False)
+        self.assertEqual(self.delete(codecurl.id).status_code, 204)
+        self.assertFalse(CodecUrls.objects.filter(pk=codecurl.pk).exists())
+
+    def test_delete_with_file_already_gone_still_succeeds(self):
+        path = self._downloads / "gone.mp4"
+        codecurl, _ = self._job(file_path=str(path))
+        path.unlink()
+        self.assertEqual(self.delete(codecurl.id).status_code, 204)
+        self.assertFalse(CodecUrls.objects.filter(pk=codecurl.pk).exists())
+
+    def test_delete_never_touches_files_outside_downloads_root(self):
+        outside = Path(self._tmp.name) / "outside.mp4"
+        other = self._downloads / "other.mp4"
+        other.write_bytes(b"y")
+        codecurl, _ = self._job(file_path=str(outside))
+
+        self.assertEqual(self.delete(codecurl.id).status_code, 204)
+        self.assertTrue(outside.exists())
+        self.assertTrue(other.exists())
+
+    def test_partial_failure_keeps_rows_and_reports_500(self):
+        path = self._downloads / "stuck.mp4"
+        codecurl, _ = self._job(file_path=str(path))
+
+        with patch.object(Path, "unlink", side_effect=PermissionError("no")):
+            response = self.delete(codecurl.id)
+
+        self.assertEqual(response.status_code, 500)
+        self.assertTrue(path.exists())
+        self.assertTrue(CodecUrls.objects.filter(pk=codecurl.pk).exists())
+        self.assertTrue(VideosUploaded.objects.filter(codecurl=codecurl).exists())
+        self.assertEqual(self.delete(codecurl.id).status_code, 204)
+        self.assertFalse(path.exists())
+
+    def test_running_job_is_refused_with_409_and_left_intact(self):
+        codecurl, _ = self._job(status=StatusCodec.PENDING, with_upload=False)
+        running_jobs.register(str(codecurl.id), threading.current_thread())
+        try:
+            response = self.delete(codecurl.id)
+        finally:
+            running_jobs.unregister(str(codecurl.id))
+
+        self.assertEqual(response.status_code, 409)
+        self.assertTrue(CodecUrls.objects.filter(pk=codecurl.pk).exists())

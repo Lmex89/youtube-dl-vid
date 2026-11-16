@@ -15,7 +15,8 @@ from videos.serializers import (
     CodecUrlsSerializer,
     VideosUpladedSerializer,
 )
-from videos.storage import DownloadStorage
+from videos.running_jobs import is_running
+from videos.storage import DownloadRetention, DownloadStorage
 
 logger = logging.getLogger("videos")
 
@@ -27,7 +28,7 @@ def ratelimited_error(request, exception):
     )
 
 
-class CodecUrlsDetailAPIView(generics.RetrieveAPIView):
+class CodecUrlsDetailAPIView(generics.RetrieveDestroyAPIView):
     queryset = CodecUrls.objects.all()
     serializer_class = CodecUrlsSerializer
     permission_classes = ()
@@ -35,6 +36,19 @@ class CodecUrlsDetailAPIView(generics.RetrieveAPIView):
     @method_decorator(ratelimit(key='user_or_ip', rate='30/m', method='GET', block=True))
     def get(self, request, *args, **kwargs):
         return super().get(request, *args, **kwargs)
+
+    def delete(self, request, pk, *args, **kwargs):
+        """Idempotent: an unknown id is already deleted (204). Running jobs are refused."""
+        if is_running(str(pk)):
+            return Response({"error": "job is running"}, status=status.HTTP_409_CONFLICT)
+        try:
+            DownloadRetention(DownloadStorage()).delete_job(
+                pk, getattr(request, "request_id", "unknown")
+            )
+        except OSError:
+            logger.exception("delete_job_failed codecurl_id=%s", pk)
+            return Response({"error": "file could not be deleted"}, status=500)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class CodecUrlsListCreateAPIView(generics.ListCreateAPIView):
@@ -115,6 +129,11 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
     queryset = VideosUploaded.objects.all()
     serializer_class = VideosUpladedSerializer
     permission_classes = ()
+
+    def get_queryset(self):
+        codecurl = self.request.query_params.get("codecurl")
+        qs = VideosUploaded.objects.all()
+        return qs.filter(codecurl=codecurl) if codecurl else qs
 
     @method_decorator(ratelimit(key='user_or_ip', rate='30/m', method='GET', block=True))
     def get(self, request, *args, **kwargs):

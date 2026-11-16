@@ -61,11 +61,13 @@ class StandardVideoProfile(BaseDownloadProfile):
     def build_command(
         self, url: str, destination: Path, workdir: Path
     ) -> List[str]:
+        max_bytes = settings.MAX_VIDEO_BYTES  # 0 = no cap (legacy behaviour)
         return [
             "yt-dlp",
             "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
             "-S", "res,ext:mp4:m4a",
             "--merge-output-format", "mp4",
+            *(["--max-filesize", str(max_bytes)] if max_bytes else []),
             *COMMON_YT_DLP_ARGS,
             url, "-o", str(destination),
         ]

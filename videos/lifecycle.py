@@ -112,8 +112,8 @@ def reconcile_success(codecurl_id: str) -> CodecUrls | None:
         return codecurl
 
 
-def mark_failed(codecurl_id: str) -> None:
+def mark_failed(codecurl_id: str, reason: str = "") -> None:
     # Never downgrade a recorded success: ADR 0001 ties Estado exitoso to its artifact.
     CodecUrls.objects.filter(pk=codecurl_id).exclude(status=StatusCodec.SUCCESS).update(
-        status=StatusCodec.ERROR, updated_at=timezone.now()
+        status=StatusCodec.ERROR, error_reason=reason, updated_at=timezone.now()
     )

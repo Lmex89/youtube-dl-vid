@@ -235,6 +235,20 @@ class DownloadRetention:
             if self._delete_file(log_path):
                 counts.logs_deleted += 1
 
+    def delete_job(self, codecurl_id, request_id: str = "unknown") -> None:
+        """Delete one job whatever its status: upload rows, files, staging, logs, then the request row.
+
+        Raises OSError before touching rows whose file could not be unlinked,
+        so a retry still finds everything it needs.
+        """
+        codecurl = CodecUrls.objects.filter(pk=codecurl_id).first()
+        if codecurl is None:
+            return
+        self._remove_job(
+            codecurl_id, get_profile(codecurl.output_profile), SupersedeCounts(), request_id
+        )
+        codecurl.delete()
+
     def supersede_earlier(
         self, codecurl, request_id: str = "unknown"
     ) -> SupersedeCounts:
