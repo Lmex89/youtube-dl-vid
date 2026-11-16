@@ -51,6 +51,8 @@ class CodecUrls(BaseModel):
         validators=[MinValueValidator(0.0), MaxValueValidator(100.0)],
     )
 
+    error_reason = models.CharField(max_length=200, blank=True, default="")
+
     def __str__(self):
         return (
             f"id={self.id}, url={self.url} profile={self.output_profile} "

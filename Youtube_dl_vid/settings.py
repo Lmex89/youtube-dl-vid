@@ -177,6 +177,7 @@ FFMPEG_BINARY = "ffmpeg"
 FFPROBE_BINARY = "ffprobe"
 MEDIA_PROCESS_TIMEOUT = 300  # seconds
 WHATSAPP_MEDIA_MAX_BYTES = 16 * 1024 * 1024
+MAX_VIDEO_BYTES = int(os.environ.get("MAX_VIDEO_BYTES", "0"))  # standard profile cap; 0 = off
 
 CSRF_COOKIE_SECURE = False
 SESSION_COOKIE_SECURE = False
@@ -194,5 +195,6 @@ CACHES = {
     },
 }
 
+RATELIMIT_ENABLE = os.environ.get("RATELIMIT_ENABLE", "1") == "1"  # off behind the organizer: one client IP would hit the per-IP limits
 RATELIMIT_USE_CACHE = "ratelimit"
 RATELIMIT_VIEW = "videos.views.ratelimited_error"

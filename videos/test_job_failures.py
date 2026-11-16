@@ -51,6 +51,18 @@ class JobFailureAndTitleTests(TestCase):
         self.assertFalse(VideosUploaded.objects.filter(codecurl=codecurl).exists())
         self.assertFalse(staging.exists())
 
+    def test_failed_standard_download_removes_its_partial_file_and_stores_reason(self):
+        codecurl = CodecUrls.objects.create(url="https://example.com/video")
+        other = self.storage.downloads_dir / "other.mp4"
+        other.write_text("keep")
+
+        outcome = self.run_job(codecurl, FakeCommandRunner(scripts=[{"fail": True, "error": "boom"}]))
+
+        codecurl.refresh_from_db()
+        self.assertEqual(outcome, "failed")
+        self.assertTrue(codecurl.error_reason)
+        self.assertEqual([p.name for p in self.storage.downloads_dir.glob("*.mp4")], ["other.mp4"])
+
     def test_timed_out_download_removes_partial_staging(self):
         codecurl = CodecUrls.objects.create(
             url="https://example.com/video", output_profile=OutputProfile.WHATSAPP_VIDEO

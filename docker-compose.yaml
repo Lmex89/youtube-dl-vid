@@ -5,8 +5,6 @@ services:
     restart: unless-stopped
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - 0.0.0.0:51432:5432/tcp
     environment:
       - POSTGRES_DB=${DB_NAME}
       - POSTGRES_USER=${DB_USER}
@@ -22,8 +20,6 @@ services:
     entrypoint: ["sh","docker-entrypoint.sh"]
     volumes:
       - .:/code
-    ports:
-      - 8011:8000
     environment:
       - DJANGO_SETTINGS_MODULE=Youtube_dl_vid.settings
       - DB_NAME=${DB_NAME}
@@ -31,8 +27,18 @@ services:
       - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required}
       - DB_HOST=${DB_HOST:-db}
       - DB_PORT=${DB_PORT:-5432}
+      - RATELIMIT_ENABLE=0
+      - MAX_VIDEO_BYTES=${MAX_VIDEO_BYTES:-524288000}
       - TZ=America/Mexico_City
+    networks:
+      default:
+      downloader:
+        aliases:
+          - downloader
     depends_on:
       - db
 volumes:
   postgres_data:
+networks:
+  downloader:
+    name: downloader-net

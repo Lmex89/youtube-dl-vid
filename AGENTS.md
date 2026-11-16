@@ -10,7 +10,9 @@ cp .env.example .env  # only if .env does not already exist
 docker compose up --build
 ```
 
-- Web at `http://localhost:8011`, PostgreSQL at `localhost:51432`
+- Web at `http://downloader:8000` on `downloader-net`; PostgreSQL at `db:5432` on the Compose network. Neither port is published
+- Verify the API with `docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/videos-uploaded/`; open PostgreSQL with `docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`
+- Compose disables rate limiting (`RATELIMIT_ENABLE=0`) and defaults `MAX_VIDEO_BYTES` to 524288000 (500 MiB). Match any override to the organizer's value; only trusted containers should join `downloader-net`
 - Compose loads `.env` for both services and maps `DB_*` to Postgres variables;
   Django requires non-empty `SECRET_KEY`, `DB_NAME`, `DB_USER` and `DB_PASSWORD`. DB host defaults to
   `db` inside the container (not `localhost`).
@@ -65,11 +67,11 @@ A `VideosUploaded` record is created only after the download succeeds.
 - **`Youtube_dl_vid/`** — project settings, logging config, middleware, URL routing
 - **`docker-entrypoint.sh`** — runs `makemigrations` → `migrate` → `collectstatic` → `gunicorn`
 - **`downloads/<codecurl-uuid>.<ext>`** — final files (`mp4`/`m4a`); re-encoded profiles stage under `downloads/.tmp/<codecurl-uuid>/` and are cleaned on success/failure. Old downloads for same URL **and profile** auto-cleaned. Per-download logs: `logs/<codecurl-uuid>.txt` (yt-dlp) and `logs/<codecurl-uuid>.ffmpeg.txt`
-- Downloads run in a daemon thread (`start_download_async`) that updates `CodecUrls.progress` in DB in real time; the thread is tracked in a module-level registry keyed by codecurl id. Restarting the container kills in-flight downloads and leaves `status=2` forever (no retry/resume)
+- Downloads run in a daemon thread (`start_download_async`) that updates `CodecUrls.progress` in DB in real time; the thread is tracked in a module-level registry keyed by codecurl id. Restarting kills in-flight downloads; the startup sweep marks interrupted jobs as failed (no retry/resume)
 
 ## Key facts
 
-- **Rate limiting**: `django-ratelimit~=4.1` with `block=True`, key=`user_or_ip`, custom 429 view at `videos.views.ratelimited_error`. LocMemCache is per-process, so limits are enforced **per gunicorn worker**, not globally
+- **Rate limiting**: disabled by Compose (`RATELIMIT_ENABLE=0`). When enabled, `django-ratelimit~=4.1` uses `block=True`, key=`user_or_ip`, and custom 429 view at `videos.views.ratelimited_error`; LocMemCache enforces limits **per gunicorn worker**, not globally
 - **Running-job protection**: `is_download_running` reads the in-process thread registry (`videos/running_jobs`), so supersession only protects jobs running in the **same gunicorn worker**; jobs running in another worker are not protected (accepted limit, see `shortcut:` in `videos/running_jobs`)
 - **Orphan metrics**: orphans carry no job id, so staging dirs and logs cannot be located; `download_orphans_cleaned` reports only `files_deleted` and `uploads_deleted`
 - **Orphan cleanup**: `manage.py cleanup_downloads` deletes `VideosUploaded` rows without a `CodecUrls` (and their files under `downloads/`). It is **manual only** — never scheduled or called from the worker
