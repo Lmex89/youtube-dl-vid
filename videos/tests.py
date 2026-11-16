@@ -779,6 +779,39 @@ class StandardVideoEndToEndTests(DownloadJobTestCase):
     Uses FakeCommandRunner so no real yt-dlp / ffmpeg runs.
     """
 
+    def test_optional_thumbnail_is_reported_served_and_deleted(self):
+        for has_thumbnail in (True, False):
+            with self.subTest(has_thumbnail=has_thumbnail):
+                class ThumbnailRunner(FakeCommandRunner):
+                    def run(self, command, *args, **kwargs):
+                        self_test.assertIn("--write-thumbnail", command)
+                        self_test.assertEqual(command[command.index("--convert-thumbnails") + 1], "jpg")
+                        result = super().run(command, *args, **kwargs)
+                        if has_thumbnail:
+                            template = next(value for value in command if value.startswith("thumbnail:"))
+                            Path(template.removeprefix("thumbnail:") + ".jpg").write_bytes(b"jpeg")
+                        return result
+
+                self_test = self
+                set_test_runner(ThumbnailRunner())
+                post = self.client.post(
+                    "/api/v1/yt/videos-uploaded/",
+                    {"url": f"https://example.com/{has_thumbnail}"}, format="json",
+                )
+                job_id = post.data["id"]
+                _wait_for_download(job_id)
+                upload = VideosUploaded.objects.get(codecurl_id=job_id)
+                listing = self.client.get(f"/api/v1/yt/videos-uploaded/?codecurl={job_id}")
+                self.assertEqual(listing.data[0]["has_thumbnail"], has_thumbnail)
+                url = f"/api/v1/yt/videos-uploaded/{upload.id}/thumbnail"
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200 if has_thumbnail else 404)
+                if has_thumbnail:
+                    self.assertEqual(b"".join(response.streaming_content), b"jpeg")
+                self.assertEqual(self.client.delete(f"/api/v1/yt/videos/{job_id}").status_code, 204)
+                self.assertFalse((self._downloads / f"{job_id}.thumbnail.jpg").exists())
+                self.assertEqual(self.client.get(url).status_code, 404)
+
     def test_standard_video_success_end_to_end(self):
         entered = threading.Event()
         release = threading.Event()
