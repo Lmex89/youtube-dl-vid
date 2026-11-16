@@ -9,7 +9,7 @@ from videos.lifecycle import (
     ProgressReporter, SuccessCommitUncertain, is_successful, mark_failed,
     reconcile_success, record_success,
 )
-from videos.models import CodecUrls
+from videos.models import CodecUrls, VideosUploaded
 from videos.process import parse_yt_dlp_progress
 from videos.profiles import get_profile
 from videos.storage import preview_url
@@ -68,6 +68,9 @@ def _fetch_and_process(codecurl, profile, paths, progress, runner) -> str:
     return title
 
 
+FAILURE_REASON = "La descarga falló: el video puede no estar disponible o superar el tamaño permitido."
+
+
 def _log_failure(job: JobContext, exc: Exception) -> None:
     logger.error(json.dumps({
         "event": "video_download_failed",
@@ -113,6 +116,7 @@ def _reconcile(job: JobContext, exc: SuccessCommitUncertain) -> CodecUrls | None
 def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) -> JobOutcome:
     """Run one download synchronously and return succeeded, failed or discarded."""
     job = JobContext(str(codecurl_id), request_id)
+    destination = None
     try:
         codecurl = CodecUrls.objects.get(pk=job.codecurl_id)
         profile = get_profile(codecurl.output_profile)
@@ -175,7 +179,9 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
         return JobOutcome.DISCARDED if discarded else JobOutcome.SUCCEEDED
     except Exception as exc:
         _log_failure(job, exc)
-        mark_failed(job.codecurl_id)
+        mark_failed(job.codecurl_id, FAILURE_REASON)
+        if destination and destination.exists() and not VideosUploaded.objects.filter(codecurl_id=job.codecurl_id).exists():
+            _discard_final(destination, job)  # partial file of this attempt only
         return JobOutcome.FAILED
     finally:
         storage.discard_staging_safely(job.codecurl_id, job.request_id)

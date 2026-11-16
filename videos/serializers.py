@@ -14,6 +14,7 @@ class CodecUrlsSerializer(serializers.ModelSerializer):
     class Meta:
         model = CodecUrls
         fields = "__all__"
+        read_only_fields = ["error_reason"]
 
 
 class VideosUpladedSerializer(serializers.ModelSerializer):
