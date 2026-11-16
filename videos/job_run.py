@@ -178,10 +178,10 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
             )
         return JobOutcome.DISCARDED if discarded else JobOutcome.SUCCEEDED
     except Exception as exc:
-        _log_failure(job, exc)
-        mark_failed(job.codecurl_id, FAILURE_REASON)
         if destination and destination.exists() and not VideosUploaded.objects.filter(codecurl_id=job.codecurl_id).exists():
             _discard_final(destination, job)  # partial file of this attempt only
+        _log_failure(job, exc)
+        mark_failed(job.codecurl_id, FAILURE_REASON)
         return JobOutcome.FAILED
     finally:
         storage.discard_staging_safely(job.codecurl_id, job.request_id)
