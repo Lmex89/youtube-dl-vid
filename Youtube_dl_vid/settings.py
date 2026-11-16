@@ -195,5 +195,6 @@ CACHES = {
     },
 }
 
+RATELIMIT_ENABLE = os.environ.get("RATELIMIT_ENABLE", "1") == "1"  # off behind the organizer: one client IP would hit the per-IP limits
 RATELIMIT_USE_CACHE = "ratelimit"
 RATELIMIT_VIEW = "videos.views.ratelimited_error"
