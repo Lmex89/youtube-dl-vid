@@ -192,9 +192,12 @@ docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/categorias/
 # List downloaded videos
 docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/videos-uploaded/
 
-# Download a video file
-docker compose exec web wget -O /code/video.mp4 'http://downloader:8000/api/v1/yt/videos-uploaded/<video-uuid>'
+# Download a video file without overwriting an existing file
+( set -C; docker compose exec -T web wget -qO- 'http://downloader:8000/api/v1/yt/videos-uploaded/<video-uuid>' > video.mp4 )
 ```
+
+Choose a destination name appropriate to the profile, such as `audio.m4a` for
+audio; the file is saved on the host.
 
 List response shape:
 
@@ -235,8 +238,8 @@ done
 # 3. Once status=1, list uploads to find the video
 docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/videos-uploaded/
 
-# 4. Download the file
-docker compose exec web wget -O /code/video.mp4 'http://downloader:8000/api/v1/yt/videos-uploaded/<video-uuid>'
+# 4. Download the video without overwriting an existing file
+( set -C; docker compose exec -T web wget -qO- 'http://downloader:8000/api/v1/yt/videos-uploaded/<video-uuid>' > video.mp4 )
 ```
 
 ## Architecture
