@@ -330,7 +330,8 @@ class BuildCommandTests(TestCase):
             command[command.index("--max-filesize") + 1], str(500 * 1024 * 1024)
         )
 
-    def test_standard_profile_has_no_filesize_cap_by_default(self):
+    @override_settings(MAX_VIDEO_BYTES=0)
+    def test_standard_profile_has_no_filesize_cap_when_disabled(self):
         command = get_profile(OutputProfile.STANDARD_VIDEO).build_command(
             "https://example.com/video",
             Path("/tmp/downloads/video.mp4"),

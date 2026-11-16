@@ -14,7 +14,7 @@ resulting files. Containerized with Docker Compose (Django + PostgreSQL).
 - **Output profiles** — standard MP4, WhatsApp-ready MP4 (H.264/AAC, ≤16 MiB),
   and M4A/AAC audio extraction
 - **Categorization** — organize downloaded videos into categories
-- **Rate limiting** — per-endpoint limits with JSON `429` responses
+- **Rate limiting** — optional per-endpoint limits with JSON `429` responses
 - **Auto-cleanup** — re-downloading a URL removes previous copies
 - **Structured JSON logging** — Loguru with request-id correlation
 - **CORS enabled** — ready for frontend integration
@@ -39,6 +39,7 @@ If `.env` already exists, keep it and skip the copy step.
 ```bash
 git clone <repository-url>
 cd youtube-dl-vid
+git switch organizer/integration
 cp .env.example .env
 # Edit .env: set SECRET_KEY and the database values before starting.
 docker compose up --build
@@ -48,21 +49,25 @@ docker compose up --build
   password in `.env`; changing the file does not change the stored credentials.
 - Generate a new `SECRET_KEY` with `python3 -c 'import secrets; print(secrets.token_urlsafe(48))'`
   and put it in `.env`. Keep it private.
-- Web API: `http://localhost:8011`
-- PostgreSQL: `localhost:51432` (internal hostname: `db`)
+- Web API: `http://downloader:8000` from containers on `downloader-net`
+- PostgreSQL: `db:5432` on the Compose project's private network
+- Neither service publishes a host port. Only trusted containers should join
+  `downloader-net`: the API has no authentication or rate limiting by default.
 - `DEBUG=False` always; served only by gunicorn via `docker-entrypoint.sh`
 
 Verify it's running:
 
 ```bash
-curl http://localhost:8011/api/v1/yt/videos/
-# -> []
+docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/videos-uploaded/
+# -> a JSON list of completed downloads
+docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
 
 ## API reference
 
-All endpoints are under `/api/v1/yt/`. There is no authentication; every
-endpoint is rate limited by client IP.
+All endpoints are under `/api/v1/yt/`. There is no authentication. The Compose
+deployment disables rate limiting because the organizer is the client; the
+limits below apply when rate limiting is enabled.
 
 ### Endpoint summary
 
@@ -93,9 +98,9 @@ Used by the `status` field on `CodecUrls` records:
 ### Download a video (async)
 
 ```bash
-curl -X POST http://localhost:8011/api/v1/yt/videos-uploaded/ \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}'
+docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/videos-uploaded/ \
+  --header='Content-Type: application/json' \
+  --post-data='{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}'
 ```
 
 The download starts immediately in a background thread and the request returns
@@ -125,20 +130,20 @@ Unknown profiles return `400` with the list of allowed values.
 
 ```bash
 # WhatsApp-ready video
-curl -X POST http://localhost:8011/api/v1/yt/videos-uploaded/ \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "output_profile": "whatsapp_video"}'
+docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/videos-uploaded/ \
+  --header='Content-Type: application/json' \
+  --post-data='{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "output_profile": "whatsapp_video"}'
 
 # Audio (M4A/AAC)
-curl -X POST http://localhost:8011/api/v1/yt/videos-uploaded/ \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "output_profile": "audio_m4a"}'
+docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/videos-uploaded/ \
+  --header='Content-Type: application/json' \
+  --post-data='{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "output_profile": "audio_m4a"}'
 ```
 
 ### Poll download status and progress
 
 ```bash
-curl http://localhost:8011/api/v1/yt/videos/52fd264c-eb2a-4f85-a9d9-d3f912aa8988
+docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/videos/52fd264c-eb2a-4f85-a9d9-d3f912aa8988
 ```
 
 ```json
@@ -164,31 +169,31 @@ Poll this endpoint until:
 download. Use it to track URLs or store ones you will download later.
 
 ```bash
-curl -X POST http://localhost:8011/api/v1/yt/videos/ \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}'
+docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/videos/ \
+  --header='Content-Type: application/json' \
+  --post-data='{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}'
 ```
 
 ### Categories
 
 ```bash
 # Create
-curl -X POST http://localhost:8011/api/v1/yt/categorias/ \
-  -H "Content-Type: application/json" \
-  -d '{"title": "Tech Talks"}'
+docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/categorias/ \
+  --header='Content-Type: application/json' \
+  --post-data='{"title": "Tech Talks"}'
 
 # List
-curl http://localhost:8011/api/v1/yt/categorias/
+docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/categorias/
 ```
 
 ### Completed downloads
 
 ```bash
 # List downloaded videos
-curl http://localhost:8011/api/v1/yt/videos-uploaded/
+docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/videos-uploaded/
 
 # Download a video file
-curl -O -J http://localhost:8011/api/v1/yt/videos-uploaded/<video-uuid>
+docker compose exec web wget -O /code/video.mp4 'http://downloader:8000/api/v1/yt/videos-uploaded/<video-uuid>'
 ```
 
 List response shape:
@@ -215,23 +220,23 @@ A `VideosUploaded` record is created only after the download succeeds.
 
 ```bash
 # 1. Start an async download
-curl -X POST http://localhost:8011/api/v1/yt/videos-uploaded/ \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}'
+docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/videos-uploaded/ \
+  --header='Content-Type: application/json' \
+  --post-data='{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}'
 # -> {"id": "<codecurl-uuid>", "status": "pending", ...}
 
 # 2. Poll progress until status=1
 while true; do
-  curl -s http://localhost:8011/api/v1/yt/videos/<codecurl-uuid>
+  docker compose exec -T web wget -qO- 'http://downloader:8000/api/v1/yt/videos/<codecurl-uuid>'
   echo
   sleep 2
 done
 
 # 3. Once status=1, list uploads to find the video
-curl http://localhost:8011/api/v1/yt/videos-uploaded/
+docker compose exec web wget -qO- http://downloader:8000/api/v1/yt/videos-uploaded/
 
 # 4. Download the file
-curl -O -J http://localhost:8011/api/v1/yt/videos-uploaded/<video-uuid>
+docker compose exec web wget -O /code/video.mp4 'http://downloader:8000/api/v1/yt/videos-uploaded/<video-uuid>'
 ```
 
 ## Architecture
@@ -245,7 +250,7 @@ curl -O -J http://localhost:8011/api/v1/yt/videos-uploaded/<video-uuid>
 │  └──────────────┘          │  downloads/  logs/           │  │
 │                            └──────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
-       │  host:8011                     │  host:51432
+       └── downloader-net: downloader:8000 (no published ports)
 ```
 
 ### Project structure
@@ -330,12 +335,15 @@ image's `POSTGRES_*` variables. Django reads the same database values.
 | `DB_PASSWORD` | None | Required, non-empty database password |
 | `DB_HOST` | `db` | Database host from the web container |
 | `DB_PORT` | `5432` | Database port from the web container |
+| `RATELIMIT_ENABLE` | `true` | Compose sets this to `0` for the private service |
+| `MAX_VIDEO_BYTES` | `0` (off) | Standard-profile yt-dlp size cap; Compose defaults to `524288000` (500 MiB); match the organizer's limit |
 
 An absent or empty `SECRET_KEY`, `DB_NAME`, `DB_USER` or `DB_PASSWORD` stops Django at startup with a
 configuration error naming the missing variable; Compose also rejects a missing
 or empty `DB_PASSWORD`. `DJANGO_SETTINGS_MODULE` and `TZ` are set in Compose.
 
-Compose interpolates unquoted and double-quoted `.env` values, including `$`.
+Set `MAX_VIDEO_BYTES` to the same value in both projects if the organizer's
+default is changed. Compose interpolates unquoted and double-quoted `.env` values, including `$`.
 Use single quotes for literal values (escape an embedded single quote as `\'`),
 or use generated URL-safe secrets to avoid quoting surprises. Exported `DB_*`
 shell variables override `.env` for Compose interpolation; unset unintended
@@ -433,8 +441,8 @@ docker compose exec web python manage.py test
 ```bash
 docker compose logs web
 ```
-Port `8011` or `51432` already in use → change the mapping in
-`docker-compose.yaml`.
+Check that the organizer has joined `downloader-net` and uses
+`http://downloader:8000` as its downloader URL.
 
 **Download fails or hangs**
 - Check the per-download log: `docker compose exec web cat /code/logs/<codecurl-uuid>.txt`
@@ -467,7 +475,8 @@ docker compose up --build
 ## Security notes
 
 Current defaults are development-friendly: `ALLOWED_HOSTS=["*"]`, open CORS,
-and no auth. Use a unique `SECRET_KEY` and database password for each deployment
+no auth, and rate limiting disabled in Compose. Only attach trusted services to
+`downloader-net`. Use a unique `SECRET_KEY` and database password for each deployment
 and protect the environment file. For production, further changes are needed:
 
 - Restrict `ALLOWED_HOSTS` in settings (it is not environment-configurable)
