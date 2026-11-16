@@ -318,6 +318,25 @@ class BuildCommandTests(TestCase):
         self.assertIn("--no-cache-dir", command)
         self.assertIn("--newline", command)
 
+    @override_settings(MAX_VIDEO_BYTES=500 * 1024 * 1024)
+    def test_standard_profile_caps_filesize_when_configured(self):
+        command = get_profile(OutputProfile.STANDARD_VIDEO).build_command(
+            "https://example.com/video",
+            Path("/tmp/downloads/video.mp4"),
+            Path("/tmp/downloads"),
+        )
+        self.assertEqual(
+            command[command.index("--max-filesize") + 1], str(500 * 1024 * 1024)
+        )
+
+    def test_standard_profile_has_no_filesize_cap_by_default(self):
+        command = get_profile(OutputProfile.STANDARD_VIDEO).build_command(
+            "https://example.com/video",
+            Path("/tmp/downloads/video.mp4"),
+            Path("/tmp/downloads"),
+        )
+        self.assertNotIn("--max-filesize", command)
+
     def test_whatsapp_profile_downloads_to_temporary_source(self):
         command = get_profile(OutputProfile.WHATSAPP_VIDEO).build_command(
             "https://example.com/video",
@@ -567,6 +586,20 @@ class VideosUploadedFileTests(TestCase):
         self.assertIn(f"{upload.id}.mp4", response["Content-Disposition"])
         self.assertEqual(
             b"".join(response.streaming_content), b"media-bytes"
+        )
+
+    def test_list_filters_by_codecurl_and_reports_size_bytes(self):
+        upload = self._upload_with_file(OutputProfile.STANDARD_VIDEO)
+        self._upload_with_file(OutputProfile.STANDARD_VIDEO, content=b"x")
+
+        response = self.client.get(
+            f"/api/v1/yt/videos-uploaded/?codecurl={upload.codecurl_id}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [(u["id"], u["size_bytes"]) for u in response.json()],
+            [(str(upload.id), len(b"media-bytes"))],
         )
 
     def test_whatsapp_video_served_with_profile_mime_and_extension(self):

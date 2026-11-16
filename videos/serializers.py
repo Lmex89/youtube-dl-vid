@@ -1,3 +1,5 @@
+import os
+
 from rest_framework import serializers
 from videos.models import CodecUrls, Categorias, VideosUploaded
 
@@ -16,7 +18,14 @@ class CodecUrlsSerializer(serializers.ModelSerializer):
 
 class VideosUpladedSerializer(serializers.ModelSerializer):
     video = serializers.CharField(source="file_path", read_only=True)
+    size_bytes = serializers.SerializerMethodField()
+
+    def get_size_bytes(self, obj):
+        try:
+            return os.stat(obj.file_path).st_size
+        except (OSError, TypeError):
+            return None
 
     class Meta:
         model = VideosUploaded
-        fields = ["id", "video", "mime_type", "title", "category", "codecurl", "created_at", "updated_at", "visible"]
+        fields = ["id", "video", "mime_type", "title", "category", "codecurl", "created_at", "updated_at", "visible", "size_bytes"]

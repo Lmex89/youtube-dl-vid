@@ -116,6 +116,11 @@ class VideosUploadedListCreateAPIView(generics.ListCreateAPIView):
     serializer_class = VideosUpladedSerializer
     permission_classes = ()
 
+    def get_queryset(self):
+        codecurl = self.request.query_params.get("codecurl")
+        qs = VideosUploaded.objects.all()
+        return qs.filter(codecurl=codecurl) if codecurl else qs
+
     @method_decorator(ratelimit(key='user_or_ip', rate='30/m', method='GET', block=True))
     def get(self, request, *args, **kwargs):
         logger.debug(
