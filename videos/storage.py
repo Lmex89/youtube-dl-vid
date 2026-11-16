@@ -86,6 +86,9 @@ class DownloadStorage:
     def staging_root(self) -> Path:
         return self.downloads_dir / STAGING_DIR_NAME
 
+    def thumbnail_path(self, codecurl_id) -> Path:
+        return self.downloads_dir / f"{codecurl_id}.thumbnail.jpg"
+
     def job_paths(
         self, codecurl_id: str, profile: BaseDownloadProfile
     ) -> JobPaths:
@@ -214,6 +217,9 @@ class DownloadRetention:
     def _remove_job(self, old_id, profile, counts: SupersedeCounts, request_id: str) -> None:
         old_codecurl = CodecUrls.objects.filter(pk=old_id).first()
         paths = self.storage.job_paths(str(old_id), profile)
+
+        if self._delete_file(self.storage.thumbnail_path(old_id)):
+            counts.files_deleted += 1
 
         for upload in VideosUploaded.objects.filter(codecurl_id=old_id):
             if self._delete_owned_file(upload.file_path):

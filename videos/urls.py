@@ -7,4 +7,5 @@ urls = [
     path("categorias/", views.CategoriasListCreateAPIView.as_view()),
     path("videos-uploaded/", views.VideosUploadedListCreateAPIView.as_view()),
     path("videos-uploaded/<uuid:pk>", views.VideosUploadedDetailAPIView.as_view()),
+    path("videos-uploaded/<uuid:pk>/thumbnail", views.VideosUploadedThumbnailAPIView.as_view()),
 ]

@@ -67,9 +67,11 @@ class StandardVideoProfile(BaseDownloadProfile):
             "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
             "-S", "res,ext:mp4:m4a",
             "--merge-output-format", "mp4",
+            "--write-thumbnail", "--convert-thumbnails", "jpg",
             *(["--max-filesize", str(max_bytes)] if max_bytes else []),
             *COMMON_YT_DLP_ARGS,
             url, "-o", str(destination),
+            "-o", f"thumbnail:{destination.with_suffix('.thumbnail')}",
         ]
 
 

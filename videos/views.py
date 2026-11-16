@@ -284,3 +284,20 @@ class VideosUploadedDetailAPIView(generics.RetrieveAPIView):
             filename=served.filename,
             content_type=served.mime_type,
         )
+
+
+class VideosUploadedThumbnailAPIView(generics.RetrieveAPIView):
+    queryset = VideosUploaded.objects.all()
+    permission_classes = ()
+
+    @method_decorator(ratelimit(key='user_or_ip', rate='10/m', method='GET', block=True))
+    def get(self, request, *args, **kwargs):
+        upload = self.get_object()
+        if not upload.codecurl_id:
+            return Response({"error": "thumbnail not found"}, status=404)
+        path = DownloadStorage().thumbnail_path(upload.codecurl_id)
+        try:
+            image = open(path, "rb")
+        except FileNotFoundError:
+            return Response({"error": "thumbnail not found"}, status=404)
+        return FileResponse(image, content_type="image/jpeg")

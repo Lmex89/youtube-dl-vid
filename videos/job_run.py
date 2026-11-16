@@ -142,6 +142,7 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
             if codecurl is None or not is_successful(codecurl):
                 if codecurl is not None:  # failure confirmed: the file has no record
                     _discard_final(destination, job)
+                    _discard_final(storage.thumbnail_path(job.codecurl_id), job)
                 _log_failure(job, exc.cause)
                 return JobOutcome.FAILED
         except Exception:
@@ -180,6 +181,8 @@ def run_job(codecurl_id: str, request_id: str, *, runner, storage, retention) ->
     except Exception as exc:
         if destination and destination.exists() and not VideosUploaded.objects.filter(codecurl_id=job.codecurl_id).exists():
             _discard_final(destination, job)  # partial file of this attempt only
+        if destination and not VideosUploaded.objects.filter(codecurl_id=job.codecurl_id).exists():
+            _discard_final(storage.thumbnail_path(job.codecurl_id), job)
         _log_failure(job, exc)
         mark_failed(job.codecurl_id, FAILURE_REASON)
         return JobOutcome.FAILED
